@@ -2,37 +2,51 @@
 
 Every version is tagged using `cs` or `js` prefix following with `/v` and semver, e.g.: `js/v1.2.3`. Details about each version is tracked in this file.
 
-## js/v0.0.10
+## js/v0.0.11 (2025-07-09)
+
+* Add support of bookmarks
+* Add `deprecatedShareId` field to `Node` entity for web's backward compatibility
+* Update of telemetry events:
+    * Added `MetricBlockVerificationErrorEvent` event
+    * Added `originalError` field including the whole error object for upload and download events
+    * Renamed `context` field to `volumeType`
+    * Removed `5xx` error type
+* Fix updating expiration time of public links
+* Fix types of Date fields in `Node` entities
+* Fix empty error message in `APIHTTPError` if there is no specific status text
+* Remove clear text node names from log messages
+
+## js/v0.0.10 (2025-06-26)
 
 * Add management of public links
 * Add `shareId` to `Device` entity for web's backward compatibility
 * Fix stuck download for large files
 
-## js/v0.0.9
+## js/v0.0.9 (2025-06-24)
 
 * Add `getNodeUid` function
 * Add `resendInvitation` function
 * Update of CryptoProxy interface to follow web monorepo: interfaces for keys
 * Update of `nodeDecryptionError` telemetry event: `nodeFolderExtendedAttributes` and `nodeActiveRevision` are now `nodeExtendedAttributes` field
 
-## js/v0.0.8
+## js/v0.0.8 (2025-06-19)
 
 * Fix external invitation for sharing
 * Update of CryptoProxy interface to follow web monorepo: passphrase can be null
 
-## js/v0.0.7
+## js/v0.0.7 (2025-06-18)
 
 * Fix move operation: reusing passphrase session key
 
-## js/v0.0.6
+## js/v0.0.6 (2025-06-17)
 
 * Update of CryptoProxy interface to follow web monorepo: array of keys or single key can be passed
 * Fix invitation: only main public key should be passed
 
-## js/v0.0.5
+## js/v0.0.5 (2025-06-11)
 
 * Add `getNode` function
 
-## js/v0.0.4
+## js/v0.0.4 (2025-06-05)
 
 * Initial version
