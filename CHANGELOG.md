@@ -2,6 +2,10 @@
 
 Every version is tagged using `cs` or `js` prefix following with `/v` and semver, e.g.: `js/v1.2.3`. Details about each version is tracked in this file.
 
+## js/v0.0.12 (2025-07-10)
+
+* Fix publish of js package
+
 ## js/v0.0.11 (2025-07-09)
 
 * Add support of bookmarks
