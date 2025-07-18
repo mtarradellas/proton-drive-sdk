@@ -2,6 +2,16 @@
 
 Every version is tagged using `cs` or `js` prefix following with `/v` and semver, e.g.: `js/v1.2.3`. Details about each version is tracked in this file.
 
+## js/v0.0.13 (2025-07-18)
+
+* Add `existingNodeUid` parameter to `NodeAlreadyExistsValidationError`
+* Add partial support of album nodes
+* Update all nodes in the user's volume to have `Admin` role by default
+* Update iterating nodes functions to decrypt nodes in parallel
+* Update upload algorithm to create draft on the server side when the stream is passed instead of at file uploader initialization
+* Fix to not return photos or albums in shared with me nodes
+* Fix types of Date fileds in `Revision` entity
+
 ## js/v0.0.12 (2025-07-10)
 
 * Fix publish of js package
