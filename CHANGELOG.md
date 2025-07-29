@@ -2,6 +2,24 @@
 
 Every version is tagged using `cs` or `js` prefix following with `/v` and semver, e.g.: `js/v1.2.3`. Details about each version is tracked in this file.
 
+## js/v0.1.0 (2025-07-29)
+
+* Add `numberOfInitializedDownloads` field to `PublicLink` entity
+* Add `clientUid` property to settings to identify the client
+* Add support of loading thumbnails from multiple volumes
+* Add diagnostic tool to check the integrity of the user's data
+* Update of event system:
+    * Added `treeEventScopeId` to `Node` entity
+    * Added `subscribeToTreeEvents`
+    * Added `subscribeToDriveEvents`
+    * Removed `subscribeToRemoteDataUpdates`
+    * Removed `subscribeToDevices`
+    * Removed `subscribeToFolder`
+    * Removed `subscribeToTrashedNodes`
+    * Removed `subscribeToSharedNodesByMe`
+    * Removed `subscribeToSharedNodesWithMe`
+* Fix rename or move of nodes after previous move operation
+
 ## js/v0.0.13 (2025-07-18)
 
 * Add `existingNodeUid` parameter to `NodeAlreadyExistsValidationError`
