@@ -2,6 +2,18 @@
 
 Every version is tagged using `cs` or `js` prefix following with `/v` and semver, e.g.: `js/v1.2.3`. Details about each version is tracked in this file.
 
+## js/v0.2.0 (2025-08-14)
+
+* Add `getSeekableStream` to the `FileDownloader` interface
+* Add verification error details to the `Author` error
+* Update of `Node` entity:
+    * Added `membership` object including `inviteTime` and `sharedBy` fields
+    * Renamed `directMemberRole` to `directRole`
+* Update of telemetry events:
+    * Added `uid` field to `decryptionError` and `verificationError` events to allow client to de-duplicate reports
+    * Added `error` field to the `verificationError` event to pass verification details
+    * Renamed `logEvent` to `recordMetric` to avoid confusion with logging
+
 ## js/v0.1.2 (2025-08-04)
 
 * Fix upload of revisions
@@ -9,7 +21,7 @@ Every version is tagged using `cs` or `js` prefix following with `/v` and semver
 
 ## js/v0.1.1 (2025-08-01)
 
-* Add `node.uid` property to `Invitation` entity
+* Add `node.uid` property to the `Invitation` entity
 * Update `iterateNodes` to batch requests to API and handle fetches to different volumes in parallel
 * Update download algorithm to skip obsolete block signatures
 * Fix accept of invitations
@@ -17,7 +29,7 @@ Every version is tagged using `cs` or `js` prefix following with `/v` and semver
 
 ## js/v0.1.0 (2025-07-29)
 
-* Add `numberOfInitializedDownloads` field to `PublicLink` entity
+* Add `numberOfInitializedDownloads` field to the `PublicLink` entity
 * Add `clientUid` property to settings to identify the client
 * Add support of loading thumbnails from multiple volumes
 * Add diagnostic tool to check the integrity of the user's data
