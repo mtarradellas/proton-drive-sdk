@@ -2,6 +2,19 @@
 
 Every version is tagged using `cs` or `js` prefix following with `/v` and semver, e.g.: `js/v1.2.3`. Details about each version is tracked in this file.
 
+## js/v0.3.0 (2025-09-04)
+
+* Update of `NodeAlreadyExistsValidationError`:
+    * Renamed to `NodeWithSameNameExistsValidationError`
+    * Renamed `ongoingUploadByOtherClient` to `isUnfinishedUpload`
+* Update what key is used to invite users to be ready for admin roles
+* Update of node decryption algorithm to improve performance
+* Update of loading shared nodes to improve performance
+* Fix accessing non-existing node (throwing not found error instead of undefined)
+* Fix errors to use correct specific type (decryption error to use DecryptionError or not found error to be based on ValidationError)
+* Fix accepting invitation and revision objects in the interface
+* Add node details to the diagnostic tool
+
 ## js/v0.2.1 (2025-08-20)
 
 * Update of `Bookmark` entity:
