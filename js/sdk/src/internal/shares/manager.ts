@@ -1,11 +1,11 @@
-import { Logger, MetricContext, ProtonDriveAccount } from "../../interface";
-import { PrivateKey } from "../../crypto";
-import { NotFoundAPIError } from "../apiService";
-import { SharesAPIService } from "./apiService";
-import { SharesCache } from "./cache";
-import { SharesCryptoCache } from "./cryptoCache";
-import { SharesCryptoService } from "./cryptoService";
-import { VolumeShareNodeIDs, EncryptedShare, EncryptedRootShare } from "./interface";
+import { Logger, MetricVolumeType, ProtonDriveAccount } from '../../interface';
+import { PrivateKey } from '../../crypto';
+import { NotFoundAPIError } from '../apiService';
+import { SharesAPIService } from './apiService';
+import { SharesCache } from './cache';
+import { SharesCryptoCache } from './cryptoCache';
+import { SharesCryptoService } from './cryptoService';
+import { VolumeShareNodeIDs, EncryptedShare, EncryptedRootShare } from './interface';
 
 /**
  * Provides high-level actions for managing shares.
@@ -43,7 +43,7 @@ export class SharesManager {
 
     /**
      * It returns the IDs of the My files section.
-     * 
+     *
      * If the default volume or My files section doesn't exist, it creates it.
      */
     async getMyFilesIDs(): Promise<VolumeShareNodeIDs> {
@@ -85,12 +85,12 @@ export class SharesManager {
 
     /**
      * Creates new default volume for the user.
-     * 
+     *
      * It generates the volume bootstrap, creates the volume on the server,
      * and caches the volume metadata.
-     * 
+     *
      * User can have only one default volume.
-     * 
+     *
      * @throws If the volume cannot be created (e.g., one already exists).
      */
     private async createVolume(): Promise<VolumeShareNodeIDs> {
@@ -117,7 +117,7 @@ export class SharesManager {
      * It is a high-level action that retrieves the private key for a share.
      * If prefers to use the cache, but if the key is not there, it fetches
      * the share from the API, decrypts it, and caches it.
-     * 
+     *
      * @param shareId - The ID of the share.
      * @returns The private key for the share.
      * @throws If the share is not found or cannot be decrypted, or cached.
@@ -126,7 +126,7 @@ export class SharesManager {
         try {
             const { key } = await this.cryptoCache.getShareKey(shareId);
             return key;
-        } catch { }
+        } catch {}
 
         const encryptedShare = await this.apiService.getRootShare(shareId);
         const { key } = await this.cryptoService.decryptRootShare(encryptedShare);
@@ -135,10 +135,10 @@ export class SharesManager {
     }
 
     async getMyFilesShareMemberEmailKey(): Promise<{
-        email: string,
-        addressId: string,
-        addressKey: PrivateKey,
-        addressKeyId: string,
+        email: string;
+        addressId: string;
+        addressKey: PrivateKey;
+        addressKeyId: string;
     }> {
         const { volumeId } = await this.getMyFilesIDs();
 
@@ -151,7 +151,7 @@ export class SharesManager {
                 addressKey: address.keys[address.primaryKeyIndex].key,
                 addressKeyId: address.keys[address.primaryKeyIndex].id,
             };
-        } catch { }
+        } catch {}
 
         const { shareId } = await this.apiService.getVolume(volumeId);
         const share = await this.apiService.getRootShare(shareId);
@@ -174,10 +174,10 @@ export class SharesManager {
     }
 
     async getContextShareMemberEmailKey(shareId: string): Promise<{
-        email: string,
-        addressId: string,
-        addressKey: PrivateKey,
-        addressKeyId: string,
+        email: string;
+        addressId: string;
+        addressKey: PrivateKey;
+        addressKeyId: string;
     }> {
         let encryptedShare = this.rootShares.get(shareId);
         if (!encryptedShare) {
@@ -195,16 +195,20 @@ export class SharesManager {
         };
     }
 
-    async getVolumeMetricContext(volumeId: string): Promise<MetricContext> {
+    async isOwnVolume(volumeId: string): Promise<boolean> {
+        return (await this.getMyFilesIDs()).volumeId === volumeId;
+    }
+
+    async getVolumeMetricContext(volumeId: string): Promise<MetricVolumeType> {
         const { volumeId: myVolumeId } = await this.getMyFilesIDs();
 
         // SDK doesn't support public sharing yet, also public sharing
         // doesn't use a volume but shareURL, thus we can simplify and
         // ignore this case for now.
         if (volumeId === myVolumeId) {
-            return MetricContext.OwnVolume;
+            return MetricVolumeType.OwnVolume;
         }
-        return MetricContext.Shared;
+        return MetricVolumeType.Shared;
     }
 
     async loadEncryptedShare(shareId: string): Promise<EncryptedShare> {

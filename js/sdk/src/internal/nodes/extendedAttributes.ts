@@ -1,4 +1,4 @@
-import { Logger } from "../../interface";
+import { Logger } from '../../interface';
 
 interface FolderExtendedAttributesSchema {
     Common?: {
@@ -38,16 +38,17 @@ interface FileExtendedAttributesSchema {
 }
 
 export interface FolderExtendedAttributes {
-    claimedModificationTime?: Date,
+    claimedModificationTime?: Date;
 }
 
 export interface FileExtendedAttributesParsed {
-    claimedSize?: number,
-    claimedModificationTime?: Date,
+    claimedSize?: number;
+    claimedModificationTime?: Date;
     claimedDigests?: {
-        sha1?: string,
-    },
-    claimedAdditionalMetadata?: object,
+        sha1?: string;
+    };
+    claimedAdditionalMetadata?: object;
+    claimedBlockSizes?: number[];
 }
 
 export function generateFolderExtendedAttributes(claimedModificationTime?: Date): string | undefined {
@@ -83,12 +84,12 @@ export function parseFolderExtendedAttributes(logger: Logger, extendedAttributes
 }
 
 export function generateFileExtendedAttributes(options: {
-    modificationTime?: Date,
-    size?: number,
-    blockSizes?: number[],
+    modificationTime?: Date;
+    size?: number;
+    blockSizes?: number[];
     digests?: {
-        sha1?: string,
-    },
+        sha1?: string;
+    };
 }): string | undefined {
     const commonAttributes: FileExtendedAttributesSchema['Common'] = {};
     if (options.modificationTime) {
@@ -113,9 +114,13 @@ export function generateFileExtendedAttributes(options: {
     });
 }
 
-export function parseFileExtendedAttributes(logger: Logger, extendedAttributes?: string): FileExtendedAttributesParsed {
+export function parseFileExtendedAttributes(
+    logger: Logger,
+    creationTime: Date,
+    extendedAttributes?: string,
+): FileExtendedAttributesParsed {
     if (!extendedAttributes) {
-        return {}
+        return {};
     }
 
     try {
@@ -128,7 +133,10 @@ export function parseFileExtendedAttributes(logger: Logger, extendedAttributes?:
             claimedSize: parseSize(logger, parsed),
             claimedModificationTime: parseModificationTime(logger, parsed),
             claimedDigests: parseDigests(logger, parsed),
-            claimedAdditionalMetadata: Object.keys(claimedAdditionalMetadata).length ? claimedAdditionalMetadata : undefined,
+            claimedAdditionalMetadata: Object.keys(claimedAdditionalMetadata).length
+                ? claimedAdditionalMetadata
+                : undefined,
+            claimedBlockSizes: parseBlockSizes(logger, creationTime, parsed),
         };
     } catch (error: unknown) {
         logger.error(`Failed to parse extended attributes`, error);
@@ -148,7 +156,10 @@ function parseSize(logger: Logger, xattr?: FileExtendedAttributesSchema): number
     return size;
 }
 
-function parseModificationTime(logger: Logger, xattr?: FolderExtendedAttributesSchema | FolderExtendedAttributesSchema): Date | undefined {
+function parseModificationTime(
+    logger: Logger,
+    xattr?: FolderExtendedAttributesSchema | FolderExtendedAttributesSchema,
+): Date | undefined {
     const modificationTime = xattr?.Common?.ModificationTime;
     if (modificationTime === undefined) {
         return undefined;
@@ -177,4 +188,34 @@ function parseDigests(logger: Logger, xattr?: FileExtendedAttributesSchema): { s
     return {
         sha1,
     };
+}
+
+function parseBlockSizes(
+    logger: Logger,
+    creationTime: Date,
+    xattr?: FileExtendedAttributesSchema,
+): number[] | undefined {
+    const blockSizes = xattr?.Common?.BlockSizes;
+    if (blockSizes === undefined) {
+        return undefined;
+    }
+    if (!Array.isArray(blockSizes)) {
+        logger.warn(`XAttr block sizes "${blockSizes}" is not valid`);
+        return undefined;
+    }
+    if (blockSizes.some((size) => typeof size !== 'number' || size <= 0)) {
+        logger.warn(`XAttr block sizes "${blockSizes}" is not valid`);
+        return undefined;
+    }
+    if (blockSizes.length === 0) {
+        return undefined;
+    }
+    // Before 2025, there was a bug on the Windows client that didn't sort
+    // the block sizes in correct order. Because the sizes were all the same
+    // except the last one, which was always smaller, the block sizes must be
+    // sorted in descending order.
+    if (creationTime < new Date('2025-01-01')) {
+        return blockSizes.sort((a, b) => b - a);
+    }
+    return blockSizes;
 }

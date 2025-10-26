@@ -1,28 +1,29 @@
-import { EntityResult } from "../../cache";
-import { ProtonDriveEntitiesCache, Logger } from "../../interface";
-import { splitNodeUid } from "../uids";
-import { DecryptedNode } from "./interface";
+import { EntityResult } from '../../cache';
+import { ProtonDriveEntitiesCache, Logger, resultOk, Result } from '../../interface';
+import { splitNodeUid } from '../uids';
+import { DecryptedNode, DecryptedRevision } from './interface';
 
 export enum CACHE_TAG_KEYS {
     ParentUid = 'nodeParentUid',
     Trashed = 'nodeTrashed',
+    Roots = 'nodeRoot',
 }
 
-type DecryptedNodeResult = (
-    {uid: string, ok: true, node: DecryptedNode} |
-    {uid: string, ok: false, error: string}
-);
+type DecryptedNodeResult = { uid: string; ok: true; node: DecryptedNode } | { uid: string; ok: false; error: string };
 
 /**
  * Provides caching for nodes metadata.
- * 
+ *
  * The cache is responsible for serialising and deserialising node metadata,
  * recording parent-child relationships, and recursively removing nodes.
- * 
+ *
  * The cache of node metadata should not contain any crypto material.
  */
 export class NodesCache {
-    constructor(private logger: Logger, private driveCache: ProtonDriveEntitiesCache) {
+    constructor(
+        private logger: Logger,
+        private driveCache: ProtonDriveEntitiesCache,
+    ) {
         this.logger = logger;
         this.driveCache = driveCache;
     }
@@ -34,10 +35,12 @@ export class NodesCache {
 
         const tags = [`volume:${volumeId}`];
         if (node.parentUid) {
-            tags.push(`${CACHE_TAG_KEYS.ParentUid}:${node.parentUid}`)
+            tags.push(`${CACHE_TAG_KEYS.ParentUid}:${node.parentUid}`);
+        } else {
+            tags.push(`${CACHE_TAG_KEYS.Roots}:${volumeId}`);
         }
         if (node.trashTime) {
-            tags.push(`${CACHE_TAG_KEYS.Trashed}`)
+            tags.push(`${CACHE_TAG_KEYS.Trashed}`);
         }
 
         await this.driveCache.setEntity(key, nodeData, tags);
@@ -50,7 +53,9 @@ export class NodesCache {
             return deserialiseNode(nodeData);
         } catch (error: unknown) {
             await this.removeCorruptedNode({ nodeUid }, error);
-            throw new Error(`Failed to deserialise node: ${error instanceof Error ? error.message : error}`)
+            throw new Error(`Failed to deserialise node: ${error instanceof Error ? error.message : error}`, {
+                cause: error,
+            });
         }
     }
 
@@ -75,12 +80,26 @@ export class NodesCache {
     }
 
     /**
+     * Remove all entries associated with a volume.
+     *
+     * This is needed when a user looses access to a volume.
+     */
+    async removeVolume(volumeId: string): Promise<void> {
+        for await (const result of this.iterateRootNodeUids(volumeId)) {
+            await this.removeNodes([result.key]);
+        }
+    }
+
+    /**
      * Remove corrupted node never throws, but it logs so we can know
      * about issues and fix them. It is crucial to remove corrupted
      * nodes and rather let SDK re-fetch them than to auotmatically
      * fix issues and do not bother user with it.
      */
-    private async removeCorruptedNode({ nodeUid, cacheUid }: { nodeUid?: string, cacheUid?: string }, corruptionError: unknown): Promise<void> {
+    private async removeCorruptedNode(
+        { nodeUid, cacheUid }: { nodeUid?: string; cacheUid?: string },
+        corruptionError: unknown,
+    ): Promise<void> {
         this.logger.error(`Removing corrupted nodes from the cache`, corruptionError);
         try {
             if (nodeUid) {
@@ -92,7 +111,9 @@ export class NodesCache {
             // The node will not be returned, thus SDK will re-fetch
             // and re-cache it. Setting it again should then fix the
             // problem.
-            this.logger.warn(`Failed to remove corrupted node from the cache: ${removingError instanceof Error ? removingError.message : removingError}`);
+            this.logger.warn(
+                `Failed to remove corrupted node from the cache: ${removingError instanceof Error ? removingError.message : removingError}`,
+            );
         }
     }
 
@@ -115,7 +136,9 @@ export class NodesCache {
 
     private async getRecursiveChildrenCacheUids(parentNodeUid: string): Promise<string[]> {
         const cacheUids = [];
-        for await (const result of this.driveCache.iterateEntitiesByTag(`${CACHE_TAG_KEYS.ParentUid}:${parentNodeUid}`)) {
+        for await (const result of this.driveCache.iterateEntitiesByTag(
+            `${CACHE_TAG_KEYS.ParentUid}:${parentNodeUid}`,
+        )) {
             cacheUids.push(result.key);
             const childrenCacheUids = await this.getRecursiveChildrenCacheUids(getNodeUid(result.key));
             cacheUids.push(...childrenCacheUids);
@@ -134,12 +157,18 @@ export class NodesCache {
     }
 
     async *iterateChildren(parentNodeUid: string): AsyncGenerator<DecryptedNodeResult> {
-        for await (const result of this.driveCache.iterateEntitiesByTag(`${CACHE_TAG_KEYS.ParentUid}:${parentNodeUid}`)) {
+        for await (const result of this.driveCache.iterateEntitiesByTag(
+            `${CACHE_TAG_KEYS.ParentUid}:${parentNodeUid}`,
+        )) {
             const node = await this.convertCacheResult(result);
             if (node && (!node.ok || !node.node.trashTime)) {
                 yield node;
             }
         }
+    }
+
+    async *iterateRootNodeUids(volumeId: string): AsyncGenerator<EntityResult<string>> {
+        yield* this.driveCache.iterateEntitiesByTag(`${CACHE_TAG_KEYS.Roots}:${volumeId}`);
     }
 
     async *iterateTrashedNodes(): AsyncGenerator<DecryptedNodeResult> {
@@ -160,13 +189,13 @@ export class NodesCache {
         try {
             nodeUid = getNodeUid(result.key);
         } catch (error: unknown) {
-            await this.removeCorruptedNode({ cacheUid: result.key }, error)
+            await this.removeCorruptedNode({ cacheUid: result.key }, error);
             return null;
         }
         if (result.ok) {
             let node;
             try {
-                node = deserialiseNode(result.value)
+                node = deserialiseNode(result.value);
             } catch (error: unknown) {
                 await this.removeCorruptedNode({ nodeUid }, error);
                 return null;
@@ -175,7 +204,7 @@ export class NodesCache {
                 uid: nodeUid,
                 ok: true,
                 node,
-            }
+            };
         } else {
             return {
                 ...result,
@@ -221,20 +250,65 @@ function serialiseNode(node: DecryptedNode) {
 function deserialiseNode(nodeData: string): DecryptedNode {
     const node = JSON.parse(nodeData);
     if (
-       !node || typeof node !== 'object' ||
-       !node.uid || typeof node.uid !== 'string' ||
-       !node.directMemberRole || typeof node.directMemberRole !== 'string' ||
-       !node.type || typeof node.type !== 'string' ||
-       (typeof node.mediaType !== 'string' && node.mediaType !== undefined) ||
-       typeof node.isShared !== 'boolean' ||
-       !node.creationTime || typeof node.creationTime !== 'string' ||
-       (typeof node.trashTime !== 'string' && node.trashTime !== undefined)
-   ) {
-       throw new Error(`Invalid node data: ${nodeData}`);
-   }
-   return {
-       ...node,
-       creationTime: new Date(node.creationTime),
-       trashTime: node.trashTime ? new Date(node.trashTime) : undefined,
-   };
+        !node ||
+        typeof node !== 'object' ||
+        !node.uid ||
+        typeof node.uid !== 'string' ||
+        !node.directRole ||
+        typeof node.directRole !== 'string' ||
+        (typeof node.membership !== 'object' && node.membership !== undefined) ||
+        !node.type ||
+        typeof node.type !== 'string' ||
+        (typeof node.mediaType !== 'string' && node.mediaType !== undefined) ||
+        typeof node.isShared !== 'boolean' ||
+        !node.creationTime ||
+        typeof node.creationTime !== 'string' ||
+        (typeof node.trashTime !== 'string' && node.trashTime !== undefined) ||
+        (typeof node.folder !== 'object' && node.folder !== undefined) ||
+        (typeof node.folder?.claimedModificationTime !== 'string' && node.folder?.claimedModificationTime !== undefined)
+    ) {
+        throw new Error(`Invalid node data: ${nodeData}`);
+    }
+    return {
+        ...node,
+        creationTime: new Date(node.creationTime),
+        trashTime: node.trashTime ? new Date(node.trashTime) : undefined,
+        activeRevision: node.activeRevision ? deserialiseRevision(node.activeRevision) : undefined,
+        membership: node.membership
+            ? {
+                  ...node.membership,
+                  inviteTime: new Date(node.membership.inviteTime),
+              }
+            : undefined,
+        folder: node.folder
+            ? {
+                  ...node.folder,
+                  claimedModificationTime: node.folder.claimedModificationTime
+                      ? new Date(node.folder.claimedModificationTime)
+                      : undefined,
+              }
+            : undefined,
+    };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function deserialiseRevision(revision: any): Result<DecryptedRevision, Error> {
+    if (
+        (typeof revision !== 'object' && revision !== undefined) ||
+        (typeof revision?.creationTime !== 'string' && revision?.creationTime !== undefined)
+    ) {
+        throw new Error(`Invalid revision data: ${revision}`);
+    }
+
+    if (revision.ok) {
+        return resultOk({
+            ...revision.value,
+            creationTime: new Date(revision.value.creationTime),
+            claimedModificationTime: revision.value.claimedModificationTime
+                ? new Date(revision.value.claimedModificationTime)
+                : undefined,
+        });
+    }
+
+    return revision;
 }

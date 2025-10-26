@@ -1,29 +1,42 @@
-import { MaybeNode as PublicMaybeNode, MaybeMissingNode as PublicMaybeMissingNode, NodeEntity as PublicNodeEntity, DegradedNode as PublicDegradedNode, Result, resultOk, resultError, MissingNode } from './interface';
-import { DecryptedNode as InternalNode } from './internal/nodes';
+import {
+    MaybeNode as PublicMaybeNode,
+    MaybeMissingNode as PublicMaybeMissingNode,
+    NodeEntity as PublicNodeEntity,
+    DegradedNode as PublicDegradedNode,
+    Revision as PublicRevision,
+    Result,
+    resultOk,
+    resultError,
+    MissingNode,
+} from './interface';
+import { DecryptedNode as InternalNode, DecryptedRevision as InternalRevision } from './internal/nodes';
 
 type InternalPartialNode = Pick<
     InternalNode,
-    'uid' |
-    'parentUid' |
-    'name' |
-    'keyAuthor' |
-    'nameAuthor' |
-    'directMemberRole' |
-    'type' |
-    'mediaType' |
-    'isShared' |
-    'creationTime' |
-    'trashTime' |
-    'activeRevision' |
-    'folder' |
-    'totalStorageSize' |
-    'errors'
+    | 'uid'
+    | 'parentUid'
+    | 'name'
+    | 'keyAuthor'
+    | 'nameAuthor'
+    | 'directRole'
+    | 'membership'
+    | 'type'
+    | 'mediaType'
+    | 'isShared'
+    | 'creationTime'
+    | 'trashTime'
+    | 'activeRevision'
+    | 'folder'
+    | 'totalStorageSize'
+    | 'errors'
+    | 'shareId'
+    | 'treeEventScopeId'
 >;
 
 type NodeUid = string | { uid: string } | Result<{ uid: string }, { uid: string }>;
 
 export function getUid(nodeUid: NodeUid): string {
-    if (typeof nodeUid === "string") {
+    if (typeof nodeUid === 'string') {
         return nodeUid;
     }
     // Directly passed NodeEntity or DegradedNode that has UID directly.
@@ -41,13 +54,17 @@ export function getUids(nodeUids: NodeUid[]): string[] {
     return nodeUids.map(getUid);
 }
 
-export async function *convertInternalNodeIterator(nodeIterator: AsyncGenerator<InternalPartialNode>): AsyncGenerator<PublicMaybeNode> {
+export async function* convertInternalNodeIterator(
+    nodeIterator: AsyncGenerator<InternalPartialNode>,
+): AsyncGenerator<PublicMaybeNode> {
     for await (const node of nodeIterator) {
         yield convertInternalNode(node);
     }
 }
 
-export async function *convertInternalMissingNodeIterator(nodeIterator: AsyncGenerator<InternalPartialNode | MissingNode>): AsyncGenerator<PublicMaybeMissingNode> {
+export async function* convertInternalMissingNodeIterator(
+    nodeIterator: AsyncGenerator<InternalPartialNode | MissingNode>,
+): AsyncGenerator<PublicMaybeMissingNode> {
     for await (const node of nodeIterator) {
         if ('missingUid' in node) {
             yield resultError(node);
@@ -68,7 +85,8 @@ export function convertInternalNode(node: InternalPartialNode): PublicMaybeNode 
         parentUid: node.parentUid,
         keyAuthor: node.keyAuthor,
         nameAuthor: node.nameAuthor,
-        directMemberRole: node.directMemberRole,
+        directRole: node.directRole,
+        membership: node.membership,
         type: node.type,
         mediaType: node.mediaType,
         isShared: node.isShared,
@@ -76,6 +94,8 @@ export function convertInternalNode(node: InternalPartialNode): PublicMaybeNode 
         trashTime: node.trashTime,
         totalStorageSize: node.totalStorageSize,
         folder: node.folder,
+        deprecatedShareId: node.shareId,
+        treeEventScopeId: node.treeEventScopeId,
     };
 
     const name = node.name;
@@ -85,7 +105,9 @@ export function convertInternalNode(node: InternalPartialNode): PublicMaybeNode 
         return resultError({
             ...baseNodeMetadata,
             name,
-            activeRevision,
+            activeRevision: activeRevision?.ok
+                ? resultOk(convertInternalRevision(activeRevision.value))
+                : activeRevision,
             errors: node.errors,
         } as PublicDegradedNode);
     }
@@ -93,6 +115,20 @@ export function convertInternalNode(node: InternalPartialNode): PublicMaybeNode 
     return resultOk({
         ...baseNodeMetadata,
         name: name.value,
-        activeRevision: activeRevision?.value,
+        activeRevision: activeRevision?.ok ? convertInternalRevision(activeRevision.value) : undefined,
     } as PublicNodeEntity);
+}
+
+function convertInternalRevision(revision: InternalRevision): PublicRevision {
+    return {
+        uid: revision.uid,
+        state: revision.state,
+        creationTime: revision.creationTime,
+        contentAuthor: revision.contentAuthor,
+        storageSize: revision.storageSize,
+        claimedSize: revision.claimedSize,
+        claimedModificationTime: revision.claimedModificationTime,
+        claimedDigests: revision.claimedDigests,
+        claimedAdditionalMetadata: revision.claimedAdditionalMetadata,
+    };
 }

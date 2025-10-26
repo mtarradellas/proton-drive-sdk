@@ -1,23 +1,24 @@
-import { PrivateKey, SessionKey } from "../../crypto";
-import { MemoryCache } from "../../cache";
-import { CachedCryptoMaterial } from "../../interface";
-import { SharesCryptoCache } from "./cryptoCache";
+import { PrivateKey, SessionKey } from '../../crypto';
+import { MemoryCache } from '../../cache';
+import { CachedCryptoMaterial } from '../../interface';
+import { getMockLogger } from '../../tests/logger';
+import { SharesCryptoCache } from './cryptoCache';
 
 describe('sharesCryptoCache', () => {
     let memoryCache: MemoryCache<CachedCryptoMaterial>;
     let cache: SharesCryptoCache;
 
     const generatePrivateKey = (name: string) => {
-        return name as unknown as PrivateKey
-    }
+        return name as unknown as PrivateKey;
+    };
 
     const generateSessionKey = (name: string) => {
-        return name as unknown as SessionKey
-    }
+        return name as unknown as SessionKey;
+    };
 
     beforeEach(() => {
         memoryCache = new MemoryCache();
-        cache = new SharesCryptoCache(memoryCache);
+        cache = new SharesCryptoCache(getMockLogger(), memoryCache);
     });
 
     it('should store and retrieve keys', async () => {
@@ -32,8 +33,14 @@ describe('sharesCryptoCache', () => {
 
     it('should replace and retrieve new keys', async () => {
         const shareId = 'newShareId';
-        const keys1 = { key: generatePrivateKey('privateKey1'), passphraseSessionKey: generateSessionKey('sessionKey1') };
-        const keys2 = { key: generatePrivateKey('privateKey2'), passphraseSessionKey: generateSessionKey('sessionKey2') };
+        const keys1 = {
+            key: generatePrivateKey('privateKey1'),
+            passphraseSessionKey: generateSessionKey('sessionKey1'),
+        };
+        const keys2 = {
+            key: generatePrivateKey('privateKey2'),
+            passphraseSessionKey: generateSessionKey('sessionKey2'),
+        };
 
         await cache.setShareKey(shareId, keys1);
         await cache.setShareKey(shareId, keys2);
@@ -47,7 +54,7 @@ describe('sharesCryptoCache', () => {
         const keys = { key: generatePrivateKey('privateKey'), passphraseSessionKey: generateSessionKey('sessionKey') };
 
         await cache.setShareKey(shareId, keys);
-        await cache.removeShareKey([shareId]);
+        await cache.removeShareKeys([shareId]);
 
         try {
             await cache.getShareKey(shareId);

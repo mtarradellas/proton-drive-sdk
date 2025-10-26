@@ -1,11 +1,14 @@
-import { PrivateKey, SessionKey, base64StringToUint8Array } from "../../crypto";
-import { Logger, Revision } from "../../interface";
-import { LoggerWithPrefix } from "../../telemetry";
+import { PrivateKey, SessionKey, base64StringToUint8Array } from '../../crypto';
+import { Logger } from '../../interface';
+import { LoggerWithPrefix } from '../../telemetry';
 import { APIHTTPError, HTTPErrorCode } from '../apiService';
-import { DownloadAPIService } from "./apiService";
+import { DecryptedRevision } from '../nodes';
+import { DownloadAPIService } from './apiService';
+import { getBlockIndex } from './blockIndex';
 import { DownloadController } from './controller';
-import { DownloadCryptoService } from "./cryptoService";
+import { DownloadCryptoService } from './cryptoService';
 import { BlockMetadata, RevisionKeys } from './interface';
+import { BufferedSeekableStream } from './seekableStream';
 import { DownloadTelemetry } from './telemetry';
 
 /**
@@ -20,17 +23,20 @@ export class FileDownloader {
 
     private controller: DownloadController;
     private nextBlockIndex = 1;
-    private ongoingDownloads = new Map<number, {
-        downloadPromise: Promise<void>,
-        decryptedBufferedBlock?: Uint8Array,
-    }>();
+    private ongoingDownloads = new Map<
+        number,
+        {
+            downloadPromise: Promise<void>;
+            decryptedBufferedBlock?: Uint8Array;
+        }
+    >();
 
     constructor(
         private telemetry: DownloadTelemetry,
         private apiService: DownloadAPIService,
         private cryptoService: DownloadCryptoService,
-        private nodeKey: { key: PrivateKey, contentKeyPacketSessionKey: SessionKey },
-        private revision: Revision,
+        private nodeKey: { key: PrivateKey; contentKeyPacketSessionKey: SessionKey },
+        private revision: DecryptedRevision,
         private signal?: AbortSignal,
         private onFinish?: () => void,
     ) {
@@ -49,7 +55,90 @@ export class FileDownloader {
         return this.revision.claimedSize;
     }
 
-    writeToStream(stream: WritableStream, onProgress: (downloadedBytes: number) => void): DownloadController {
+    getSeekableStream(): BufferedSeekableStream {
+        let position = 0;
+        let cryptoKeys: RevisionKeys;
+
+        const logger = new LoggerWithPrefix(this.logger, `seekable stream`);
+
+        const claimedBlockSizes = this.revision.claimedBlockSizes;
+        if (!claimedBlockSizes) {
+            // Old nodes will not have claimed block sizes. One option is to
+            // use default block size, but old clients didn't use the same
+            // size (4 MiB vs 4 MB, for example).
+            // Ideally, we should throw error that client can easily handle,
+            // at the same time, new nodes shouldn't have this issue.
+            // For now, we throw general error that client must handle as any
+            // error from download - do not support seeking and ask user to
+            // download the whole file instead.
+            // In the future, we might either change this error, or have some
+            // clever way to detect block sizes from the first block and work
+            // around this issue.
+            throw new Error('Revision does not have defined claimed block sizes');
+        }
+
+        const stream = new BufferedSeekableStream({
+            start: async () => {
+                logger.debug(`Starting`);
+                cryptoKeys = await this.cryptoService.getRevisionKeys(this.nodeKey, this.revision);
+            },
+            pull: async (controller) => {
+                logger.debug(`Pulling at position ${position}`);
+
+                const result = await this.downloadDataFromPosition(claimedBlockSizes, position, cryptoKeys);
+                if (result instanceof Error) {
+                    logger.error('Download failed', result);
+                    controller.error(result);
+                    return;
+                }
+                if (!result) {
+                    logger.debug(`Download finished at position ${position}`);
+                    controller.close();
+                    return;
+                }
+                controller.enqueue(result);
+                position += result.length;
+            },
+            cancel: (reason?: unknown) => {
+                logger.info(`Cancelled: ${reason}`);
+                this.onFinish?.();
+            },
+            seek: async (newPosition) => {
+                logger.info(`Seeking to position ${newPosition}`);
+                position = newPosition;
+            },
+        });
+        return stream;
+    }
+
+    private async downloadDataFromPosition(
+        claimedBlockSizes: number[],
+        position: number,
+        cryptoKeys: RevisionKeys,
+    ): Promise<Uint8Array | Error | undefined> {
+        const { value, done } = getBlockIndex(claimedBlockSizes, position);
+        if (done) {
+            return;
+        }
+
+        this.logger.info(`Downloading data from block ${value.blockIndex} at offset ${value.blockOffset}`);
+
+        try {
+            const { blockIndex, blockOffset } = value;
+            const blockMetadata = await this.apiService.getRevisionBlockToken(
+                this.revision.uid,
+                blockIndex,
+                this.signal,
+            );
+
+            const blockData = await this.downloadBlockData(blockMetadata, true, cryptoKeys);
+            return blockData.slice(blockOffset);
+        } catch (error: unknown) {
+            return error instanceof Error ? error : new Error(`Unknown error: ${error}`, { cause: error });
+        }
+    }
+
+    writeToStream(stream: WritableStream, onProgress?: (downloadedBytes: number) => void): DownloadController {
         if (this.controller.promise) {
             throw new Error(`Download already started`);
         }
@@ -57,7 +146,7 @@ export class FileDownloader {
         return this.controller;
     }
 
-    unsafeWriteToStream(stream: WritableStream, onProgress: (downloadedBytes: number) => void): DownloadController {
+    unsafeWriteToStream(stream: WritableStream, onProgress?: (downloadedBytes: number) => void): DownloadController {
         if (this.controller.promise) {
             throw new Error(`Download already started`);
         }
@@ -68,7 +157,7 @@ export class FileDownloader {
 
     private async downloadToStream(
         stream: WritableStream,
-        onProgress?: (writtenBytes: number) => void,
+        onProgress?: (downloadedBytes: number) => void,
         ignoreIntegrityErrors = false,
     ): Promise<void> {
         const writer = stream.getWriter();
@@ -104,18 +193,22 @@ export class FileDownloader {
                     cryptoKeys,
                     (downloadedBytes) => {
                         fileProgress += downloadedBytes;
-                        onProgress?.(downloadedBytes);
+                        onProgress?.(fileProgress);
                     },
                 );
                 this.ongoingDownloads.set(blockMetadata.index, { downloadPromise });
 
                 await this.waitForDownloadCapacity();
-                await this.flushCompletedBlocks(writer);
+                await this.flushCompletedBlocks(async (chunk) => {
+                    await writer.write(chunk);
+                });
             }
 
             this.logger.debug(`All blocks downloading, waiting for them to finish`);
             await Promise.all(this.downloadPromises);
-            await this.flushCompletedBlocks(writer);
+            await this.flushCompletedBlocks(async (chunk) => {
+                await writer.write(chunk);
+            });
 
             if (this.ongoingDownloads.size > 0) {
                 this.logger.error(`Some blocks were not downloaded: ${this.ongoingDownloads.keys()}`);
@@ -127,7 +220,12 @@ export class FileDownloader {
                 this.logger.warn('Skipping manifest check');
             } else {
                 this.logger.debug(`Verifying manifest`);
-                await this.cryptoService.verifyManifest(this.revision, this.nodeKey.key, allBlockHashes, armoredManifestSignature);
+                await this.cryptoService.verifyManifest(
+                    this.revision,
+                    this.nodeKey.key,
+                    allBlockHashes,
+                    armoredManifestSignature,
+                );
             }
 
             await writer.close();
@@ -150,6 +248,16 @@ export class FileDownloader {
         cryptoKeys: RevisionKeys,
         onProgress: (downloadedBytes: number) => void,
     ) {
+        const blockData = await this.downloadBlockData(blockMetadata, ignoreIntegrityErrors, cryptoKeys, onProgress);
+        this.ongoingDownloads.get(blockMetadata.index)!.decryptedBufferedBlock = blockData;
+    }
+
+    private async downloadBlockData(
+        blockMetadata: BlockMetadata,
+        ignoreIntegrityErrors: boolean,
+        cryptoKeys: RevisionKeys,
+        onProgress?: (downloadedBytes: number) => void,
+    ): Promise<Uint8Array> {
         const logger = new LoggerWithPrefix(this.logger, `block ${blockMetadata.index}`);
         logger.info(`Download started`);
 
@@ -161,10 +269,15 @@ export class FileDownloader {
             logger.debug(`Downloading`);
             await this.controller.waitWhilePaused();
             try {
-                const encryptedBlock = await this.apiService.downloadBlock(blockMetadata.bareUrl, blockMetadata.token, (downloadedBytes) => {
-                    blockProgress += downloadedBytes;
-                    onProgress?.(downloadedBytes);
-                }, this.signal);
+                const encryptedBlock = await this.apiService.downloadBlock(
+                    blockMetadata.bareUrl,
+                    blockMetadata.token,
+                    (downloadedBytes) => {
+                        blockProgress += downloadedBytes;
+                        onProgress?.(downloadedBytes);
+                    },
+                    this.signal,
+                );
 
                 if (ignoreIntegrityErrors) {
                     logger.warn('Skipping hash check');
@@ -174,7 +287,7 @@ export class FileDownloader {
                 }
 
                 logger.debug(`Decrypting`);
-                decryptedBlock = await this.cryptoService.decryptBlock(encryptedBlock, blockMetadata.armoredSignature!, cryptoKeys);
+                decryptedBlock = await this.cryptoService.decryptBlock(encryptedBlock, cryptoKeys);
             } catch (error) {
                 if (blockProgress !== 0) {
                     onProgress?.(-blockProgress);
@@ -183,7 +296,11 @@ export class FileDownloader {
 
                 if (error instanceof APIHTTPError && error.statusCode === HTTPErrorCode.NOT_FOUND) {
                     logger.warn(`Token expired, fetching new token and retrying`);
-                    blockMetadata = await this.apiService.getRevisionBlockToken(this.revision.uid, blockMetadata.index, this.signal);
+                    blockMetadata = await this.apiService.getRevisionBlockToken(
+                        this.revision.uid,
+                        blockMetadata.index,
+                        this.signal,
+                    );
                     continue;
                 }
 
@@ -202,8 +319,8 @@ export class FileDownloader {
             }
         }
 
-        this.ongoingDownloads.get(blockMetadata.index)!.decryptedBufferedBlock = decryptedBlock;
         logger.info(`Downloaded`);
+        return decryptedBlock;
     }
 
     private async waitForDownloadCapacity() {
@@ -234,16 +351,16 @@ export class FileDownloader {
         }
     }
 
-    private async flushCompletedBlocks(writer: WritableStreamDefaultWriter<Uint8Array>) {
+    private async flushCompletedBlocks(write: (chunk: Uint8Array) => void | Promise<void>) {
         this.logger.debug(`Flushing completed blocks`);
         while (this.isNextBlockDownloaded) {
             const decryptedBlock = this.ongoingDownloads.get(this.nextBlockIndex)!.decryptedBufferedBlock!;
             this.logger.info(`Flushing completed block ${this.nextBlockIndex}`);
             try {
-                await writer.write(decryptedBlock);
+                await write(decryptedBlock);
             } catch (error) {
                 this.logger.error(`Failed to write block, retrying once`, error);
-                await writer.write(decryptedBlock);
+                await write(decryptedBlock);
             }
             this.ongoingDownloads.delete(this.nextBlockIndex);
             this.nextBlockIndex++;
@@ -255,7 +372,8 @@ export class FileDownloader {
     }
 
     private get ongoingDownloadPromises() {
-        return this.ongoingDownloads.values()
+        return this.ongoingDownloads
+            .values()
             .filter((value) => value.decryptedBufferedBlock === undefined)
             .map((value) => value.downloadPromise);
     }

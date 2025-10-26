@@ -1,4 +1,4 @@
-import { Logger, NodeType, MemberRole } from "../../interface";
+import { Logger, NodeType, MemberRole } from '../../interface';
 
 export function nodeTypeNumberToNodeType(logger: Logger, nodeTypeNumber: number): NodeType {
     switch (nodeTypeNumber) {
@@ -6,13 +6,15 @@ export function nodeTypeNumberToNodeType(logger: Logger, nodeTypeNumber: number)
             return NodeType.Folder;
         case 2:
             return NodeType.File;
+        case 3:
+            return NodeType.Album;
         default:
             logger.warn(`Unknown node type: ${nodeTypeNumber}`);
             return NodeType.File;
     }
 }
 
-export function permissionsToDirectMemberRole(logger: Logger, permissionsNumber?: number): MemberRole {
+export function permissionsToMemberRole(logger: Logger, permissionsNumber?: number): MemberRole {
     switch (permissionsNumber) {
         case undefined:
             return MemberRole.Inherited;
@@ -32,7 +34,7 @@ export function permissionsToDirectMemberRole(logger: Logger, permissionsNumber?
 export function memberRoleToPermission(memberRole: MemberRole): 4 | 6 | 22 {
     if (memberRole === MemberRole.Inherited) {
         // This is developer error.
-        throw new Error("Cannot convert inherited role to permission");
+        throw new Error('Cannot convert inherited role to permission');
     }
     switch (memberRole) {
         case MemberRole.Viewer:

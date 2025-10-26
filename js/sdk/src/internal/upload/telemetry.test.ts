@@ -14,7 +14,7 @@ describe('UploadTelemetry', () => {
 
     beforeEach(() => {
         mockTelemetry = {
-            logEvent: jest.fn(),
+            recordMetric: jest.fn(),
             getLogger: jest.fn().mockReturnValue({
                 info: jest.fn(),
                 warn: jest.fn(),
@@ -25,41 +25,45 @@ describe('UploadTelemetry', () => {
 
         sharesService = {
             getVolumeMetricContext: jest.fn().mockResolvedValue('own_volume'),
-        }
+        };
 
         uploadTelemetry = new UploadTelemetry(mockTelemetry, sharesService);
     });
 
     it('should log failure during init (excludes uploaded size)', async () => {
-        await uploadTelemetry.uploadInitFailed(parentNodeUid, new Error('Failed'), 1000);
+        const error = new Error('Failed');
+        await uploadTelemetry.uploadInitFailed(parentNodeUid, error, 1000);
 
-        expect(mockTelemetry.logEvent).toHaveBeenCalledWith({
-            eventName: "upload",
-            context: "own_volume",
+        expect(mockTelemetry.recordMetric).toHaveBeenCalledWith({
+            eventName: 'upload',
+            volumeType: 'own_volume',
             uploadedSize: 0,
             expectedSize: 1000,
-            error: "unknown",
+            error: 'unknown',
+            originalError: error,
         });
     });
 
     it('should log failure upload', async () => {
-        await uploadTelemetry.uploadFailed(revisionUid, new Error('Failed'), 500, 1000);
+        const error = new Error('Failed');
+        await uploadTelemetry.uploadFailed(revisionUid, error, 500, 1000);
 
-        expect(mockTelemetry.logEvent).toHaveBeenCalledWith({
-            eventName: "upload",
-            context: "own_volume",
+        expect(mockTelemetry.recordMetric).toHaveBeenCalledWith({
+            eventName: 'upload',
+            volumeType: 'own_volume',
             uploadedSize: 500,
             expectedSize: 1000,
-            error: "unknown",
+            error: 'unknown',
+            originalError: error,
         });
     });
 
     it('should log successful upload (excludes error)', async () => {
         await uploadTelemetry.uploadFinished(revisionUid, 1000);
 
-        expect(mockTelemetry.logEvent).toHaveBeenCalledWith({
-            eventName: "upload",
-            context: "own_volume",
+        expect(mockTelemetry.recordMetric).toHaveBeenCalledWith({
+            eventName: 'upload',
+            volumeType: 'own_volume',
             uploadedSize: 1000,
             expectedSize: 1000,
         });
@@ -67,17 +71,17 @@ describe('UploadTelemetry', () => {
 
     describe('detect error category', () => {
         const verifyErrorCategory = (error: string) => {
-            expect(mockTelemetry.logEvent).toHaveBeenCalledWith(
+            expect(mockTelemetry.recordMetric).toHaveBeenCalledWith(
                 expect.objectContaining({
                     error,
-                })
+                }),
             );
         };
 
         it('should ignore ValidationError', async () => {
             const error = new ValidationError('Validation error');
             await uploadTelemetry.uploadFailed(revisionUid, error, 500, 1000);
-            expect(mockTelemetry.logEvent).not.toHaveBeenCalled();
+            expect(mockTelemetry.recordMetric).not.toHaveBeenCalled();
         });
 
         it('should ignore AbortError', async () => {
@@ -85,7 +89,7 @@ describe('UploadTelemetry', () => {
             error.name = 'AbortError';
             await uploadTelemetry.uploadFailed(revisionUid, error, 500, 1000);
 
-            expect(mockTelemetry.logEvent).not.toHaveBeenCalled();
+            expect(mockTelemetry.recordMetric).not.toHaveBeenCalled();
         });
 
         it('should detect "rate_limited" error for RateLimitedError', async () => {
@@ -109,7 +113,7 @@ describe('UploadTelemetry', () => {
         it('should detect "5xx" error for APIHTTPError with 5xx status code', async () => {
             const error = new APIHTTPError('Server error', 500);
             await uploadTelemetry.uploadFailed(revisionUid, error, 500, 1000);
-            verifyErrorCategory('5xx');
+            verifyErrorCategory('server_error');
         });
 
         it('should detect "server_error" for TimeoutError', async () => {

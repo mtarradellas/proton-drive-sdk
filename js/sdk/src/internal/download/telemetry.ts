@@ -1,16 +1,19 @@
-import { RateLimitedError, ValidationError, DecryptionError, IntegrityError } from "../../errors";
-import { ProtonDriveTelemetry, MetricsDownloadErrorType, Logger } from "../../interface";
-import { LoggerWithPrefix } from "../../telemetry";
+import { RateLimitedError, ValidationError, DecryptionError, IntegrityError } from '../../errors';
+import { ProtonDriveTelemetry, MetricsDownloadErrorType, Logger } from '../../interface';
+import { LoggerWithPrefix } from '../../telemetry';
 import { APIHTTPError } from '../apiService';
-import { splitNodeRevisionUid, splitNodeUid } from "../uids";
-import { SharesService } from "./interface";
+import { splitNodeRevisionUid, splitNodeUid } from '../uids';
+import { SharesService } from './interface';
 
 export class DownloadTelemetry {
     private logger: Logger;
 
-    constructor(private telemetry: ProtonDriveTelemetry, private sharesService: SharesService) {
+    constructor(
+        private telemetry: ProtonDriveTelemetry,
+        private sharesService: SharesService,
+    ) {
         this.telemetry = telemetry;
-        this.logger = this.telemetry.getLogger("download");
+        this.logger = this.telemetry.getLogger('download');
         this.sharesService = sharesService;
     }
 
@@ -31,6 +34,7 @@ export class DownloadTelemetry {
         await this.sendTelemetry(volumeId, {
             downloadedSize: 0,
             error: errorCategory,
+            originalError: error,
         });
     }
 
@@ -48,6 +52,7 @@ export class DownloadTelemetry {
             downloadedSize,
             claimedFileSize,
             error: errorCategory,
+            originalError: error,
         });
     }
 
@@ -59,21 +64,25 @@ export class DownloadTelemetry {
         });
     }
 
-    private async sendTelemetry(volumeId: string, options: {
-        downloadedSize: number,
-        claimedFileSize?: number,
-        error?: MetricsDownloadErrorType,
-    }) {
-        let context;
+    private async sendTelemetry(
+        volumeId: string,
+        options: {
+            downloadedSize: number;
+            claimedFileSize?: number;
+            error?: MetricsDownloadErrorType;
+            originalError?: unknown;
+        },
+    ) {
+        let volumeType;
         try {
-            context = await this.sharesService.getVolumeMetricContext(volumeId);
+            volumeType = await this.sharesService.getVolumeMetricContext(volumeId);
         } catch (error: unknown) {
-            this.logger.error('Failed to get metric context', error);
+            this.logger.error('Failed to get metric volume type', error);
         }
 
-        this.telemetry.logEvent({
+        this.telemetry.recordMetric({
             eventName: 'download',
-            context,
+            volumeType,
             ...options,
         });
     }
@@ -97,14 +106,18 @@ function getErrorCategory(error: unknown): MetricsDownloadErrorType | undefined 
             return '4xx';
         }
         if (error.statusCode >= 500) {
-            return '5xx';
+            return 'server_error';
         }
     }
     if (error instanceof Error) {
         if (error.name === 'TimeoutError') {
             return 'server_error';
         }
-        if (error.name === 'OfflineError' || error.name === 'NetworkError' || error.message?.toLowerCase() === 'network error') {
+        if (
+            error.name === 'OfflineError' ||
+            error.name === 'NetworkError' ||
+            error.message?.toLowerCase() === 'network error'
+        ) {
             return 'network_error';
         }
         if (error.name === 'AbortError') {

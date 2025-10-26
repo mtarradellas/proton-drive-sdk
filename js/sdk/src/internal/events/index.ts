@@ -1,16 +1,18 @@
-import { ProtonDriveEntitiesCache, Logger, ProtonDriveTelemetry } from "../../interface";
-import { DriveAPIService } from "../apiService";
-import { DriveListener } from "./interface";
-import { EventsAPIService } from "./apiService";
-import { EventsCache } from "./cache";
-import { CoreEventManager } from "./coreEventManager";
-import { VolumeEventManager } from "./volumeEventManager";
+import { Logger, ProtonDriveTelemetry } from '../../interface';
+import { DriveAPIService } from '../apiService';
+import { DriveEvent, DriveListener, EventSubscription, LatestEventIdProvider } from './interface';
+import { EventsAPIService } from './apiService';
+import { CoreEventManager } from './coreEventManager';
+import { VolumeEventManager } from './volumeEventManager';
+import { EventManager } from './eventManager';
+import { SharesManager } from '../shares/manager';
 
-export type { DriveEvent, DriveListener } from "./interface";
-export { DriveEventType } from "./interface";
+export type { DriveEvent, DriveListener, EventSubscription } from './interface';
+export { DriveEventType } from './interface';
 
 const OWN_VOLUME_POLLING_INTERVAL = 30;
 const OTHER_VOLUME_POLLING_INTERVAL = 60;
+const CORE_POLLING_INTERVAL = 30;
 
 /**
  * Service for listening to drive events. The service is responsible for
@@ -19,113 +21,109 @@ const OTHER_VOLUME_POLLING_INTERVAL = 60;
  */
 export class DriveEventsService {
     private apiService: EventsAPIService;
-    private cache: EventsCache;
-    private subscribedToRemoteDataUpdates: boolean = false;
-    private listeners: DriveListener[] = [];
-    private coreEvents: CoreEventManager;
-    private volumesEvents: { [volumeId: string]: VolumeEventManager };
+    private coreEventManager?: EventManager<DriveEvent>;
+    private volumeEventManagers: { [volumeId: string]: EventManager<DriveEvent> };
     private logger: Logger;
 
-    constructor(private telemetry: ProtonDriveTelemetry, apiService: DriveAPIService, driveEntitiesCache: ProtonDriveEntitiesCache) {
+    constructor(
+        private telemetry: ProtonDriveTelemetry,
+        apiService: DriveAPIService,
+        private shareManagement: SharesManager,
+        private cacheEventListeners: DriveListener[] = [],
+        private latestEventIdProvider?: LatestEventIdProvider,
+    ) {
         this.telemetry = telemetry;
         this.logger = telemetry.getLogger('events');
         this.apiService = new EventsAPIService(apiService);
-        this.cache = new EventsCache(driveEntitiesCache);
+        this.volumeEventManagers = {};
+    }
 
-        // FIXME: Allow to pass own core events manager from the public interface.
-        this.coreEvents = new CoreEventManager(this.logger, this.apiService, this.cache);
-        this.volumesEvents = {};
+    // FIXME: Allow to pass own core events manager from the public interface.
+    async subscribeToCoreEvents(callback: DriveListener): Promise<EventSubscription> {
+        let manager = this.coreEventManager;
+        const started = !!manager;
+
+        if (manager === undefined) {
+            manager = await this.createCoreEventManager();
+            this.coreEventManager = manager;
+        }
+
+        const eventSubscription = manager.addListener(callback);
+        if (!started) {
+            await manager.start();
+        }
+        return eventSubscription;
+    }
+
+    private async createCoreEventManager() {
+        if (!this.latestEventIdProvider) {
+            throw new Error(
+                'Cannot subscribe to events without passing a latestEventIdProvider in ProtonDriveClient initialization',
+            );
+        }
+
+        const coreEventManager = new CoreEventManager(this.logger, this.apiService);
+        const latestEventId = this.latestEventIdProvider.getLatestEventId('core') ?? null;
+        const eventManager = new EventManager(coreEventManager, CORE_POLLING_INTERVAL, latestEventId);
+
+        for (const listener of this.cacheEventListeners) {
+            eventManager.addListener(listener);
+        }
+
+        return eventManager;
     }
 
     /**
-     * Loads all the subscribed volumes (including core events) from the
-     * cache and starts listening to their events. Any additional volume
-     * that is subscribed to later will be automatically started.
+     * Subscribe to drive events. The treeEventScopeId can be obtained from a node.
      */
-    async subscribeToRemoteDataUpdates(): Promise<void> {
-        if (this.subscribedToRemoteDataUpdates) {
-            return;
+    async subscribeToTreeEvents(treeEventScopeId: string, callback: DriveListener): Promise<EventSubscription> {
+        const volumeId = treeEventScopeId;
+        let manager = this.volumeEventManagers[volumeId];
+        const started = !!manager;
+
+        if (manager === undefined) {
+            manager = await this.createVolumeEventManager(volumeId);
+            this.volumeEventManagers[volumeId] = manager;
         }
 
-        await this.loadSubscribedVolumeEventServices();
-        this.sendNumberOfVolumeSubscriptionsToTelemetry();
-
-        this.subscribedToRemoteDataUpdates = true;
-        await this.coreEvents.startSubscription();
-        await Promise.all(
-            Object.values(this.volumesEvents)
-                .map((volumeEvents) => volumeEvents.startSubscription())
-        );
-    }
-
-    /**
-     * Subscribe to given volume. The volume will be polled for events
-     * with the polling interval depending on the type of the volume.
-     * Own volumes are polled with highest frequency, while others are
-     * polled with lower frequency depending on the total number of
-     * subscriptions.
-     * 
-     * @param isOwnVolume - Owned volumes are polled with higher frequency.
-     */
-    async listenToVolume(volumeId: string, isOwnVolume = false): Promise<void> {
-        await this.loadSubscribedVolumeEventServices();
-
-        if (this.volumesEvents[volumeId]) {
-            return;
-        }
-        this.logger.debug(`Creating volume event manager for volume ${volumeId}`);
-        const manager = this.createVolumeEventManager(volumeId, isOwnVolume);
-
-        // FIXME: Use dynamic algorithm to determine polling interval for non-own volumes.
-        manager.setPollingInterval(isOwnVolume ? OWN_VOLUME_POLLING_INTERVAL : OTHER_VOLUME_POLLING_INTERVAL);
-        if (this.subscribedToRemoteDataUpdates) {
-            await manager.startSubscription();
+        const eventSubscription = manager.addListener(callback);
+        if (!started) {
+            await manager.start();
             this.sendNumberOfVolumeSubscriptionsToTelemetry();
         }
+        return eventSubscription;
     }
 
-    private async loadSubscribedVolumeEventServices() {
-        for (const volumeId of await this.cache.getSubscribedVolumeIds()) {
-            if (!this.volumesEvents[volumeId]) {
-                const isOwnVolume = await this.cache.isOwnVolume(volumeId) || false;
-                this.createVolumeEventManager(volumeId, isOwnVolume);
-            }
+    private async createVolumeEventManager(volumeId: string): Promise<EventManager<DriveEvent>> {
+        if (!this.latestEventIdProvider) {
+            throw new Error(
+                'Cannot subscribe to events without passing a latestEventIdProvider in ProtonDriveClient initialization',
+            );
         }
+
+        this.logger.debug(`Creating volume event manager for volume ${volumeId}`);
+        const volumeEventManager = new VolumeEventManager(this.logger, this.apiService, volumeId);
+
+        const isOwnVolume = await this.shareManagement.isOwnVolume(volumeId);
+        const pollingInterval = this.getDefaultVolumePollingInterval(isOwnVolume);
+        const latestEventId = this.latestEventIdProvider.getLatestEventId(volumeId);
+        const eventManager = new EventManager<DriveEvent>(volumeEventManager, pollingInterval, latestEventId);
+
+        for (const listener of this.cacheEventListeners) {
+            eventManager.addListener(listener);
+        }
+
+        return eventManager;
+    }
+
+    private getDefaultVolumePollingInterval(isOwnVolume: boolean): number {
+        return isOwnVolume ? OWN_VOLUME_POLLING_INTERVAL : OTHER_VOLUME_POLLING_INTERVAL;
     }
 
     private sendNumberOfVolumeSubscriptionsToTelemetry() {
-        this.telemetry.logEvent({
+        this.telemetry.recordMetric({
             eventName: 'volumeEventsSubscriptionsChanged',
-            numberOfVolumeSubscriptions: Object.keys(this.volumesEvents).length,
+            numberOfVolumeSubscriptions: Object.keys(this.volumeEventManagers).length,
         });
-    }
-
-    private createVolumeEventManager(volumeId: string, isOwnVolume: boolean): VolumeEventManager {
-        const manager = new VolumeEventManager(this.logger, this.apiService, this.cache, volumeId, isOwnVolume);
-        for (const listener of this.listeners) {
-            manager.addListener(listener);
-        }
-        this.volumesEvents[volumeId] = manager;
-        return manager;
-    }
-
-    /**
-     * Listen to the drive events. The listener will be called with the
-     * new events as they arrive.
-     * 
-     * One call always provides events from withing the same volume. The
-     * second argument of the callback `fullRefreshVolumeId` is thus single
-     * ID and if multiple volumes must be fully refreshed, client will
-     * receive multiple calls.
-     */
-    addListener(callback: DriveListener): void {
-        // Add new listener to the list for any new event manager.
-        this.listeners.push(callback);
-
-        // Add new listener to all existings managers.
-        this.coreEvents.addListener(callback);
-        for (const volumeEvents of Object.values(this.volumesEvents)) {
-            volumeEvents.addListener(callback);
-        }
     }
 }

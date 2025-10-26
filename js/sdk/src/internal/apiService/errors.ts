@@ -3,17 +3,29 @@ import { c } from 'ttag';
 import { ServerError, ValidationError } from '../../errors';
 import { ErrorCode, HTTPErrorCode } from './errorCodes';
 
-export function apiErrorFactory({ response, result }: { response: Response, result?: unknown }): ServerError {
+export function apiErrorFactory({
+    response,
+    result,
+    error,
+}: {
+    response: Response;
+    result?: unknown;
+    error?: unknown;
+}): ServerError {
     // Backend responses with 404 both in the response and body code.
     // In such a case we want to stick to APIHTTPError to be very clear
     // it is not NotFoundAPIError.
     if (response.status === HTTPErrorCode.NOT_FOUND || !result) {
-        return new APIHTTPError(response.statusText, response.status);
+        const fallbackMessage = error instanceof Error ? error.message : c('Error').t`Unknown error`;
+        const apiHttpError = new APIHTTPError(response.statusText || fallbackMessage, response.status);
+        apiHttpError.cause = error;
+        return apiHttpError;
     }
 
     const typedResult = result as {
         Code?: number;
         Error?: string;
+        Details?: object;
         exception?: string;
         message?: string;
         file?: string;
@@ -21,24 +33,31 @@ export function apiErrorFactory({ response, result }: { response: Response, resu
         trace?: object;
     };
 
-    const [code, message] = [typedResult.Code || 0, typedResult.Error || c('Error').t`Unknown error`];
+    const [code, message, details] = [
+        typedResult.Code || 0,
+        typedResult.Error || c('Error').t`Unknown error`,
+        typedResult.Details,
+    ];
 
-    const debug = typedResult.exception ? {
-        exception: typedResult.exception,
-        message: typedResult.message,
-        file: typedResult.file,
-        line: typedResult.line,
-        trace: typedResult.trace,
-    } : undefined;
+    const debug = typedResult.exception
+        ? {
+              exception: typedResult.exception,
+              message: typedResult.message,
+              file: typedResult.file,
+              line: typedResult.line,
+              trace: typedResult.trace,
+          }
+        : undefined;
 
     switch (code) {
         case ErrorCode.NOT_EXISTS:
-            return new NotFoundAPIError(message, code);
+            return new NotFoundAPIError(message, code, details);
         // ValidationError should be only when it is clearly user input error,
         // otherwise it should be ServerError.
         // Here we convert only general enough codes. Specific cases that are
         // not clear from the code itself must be handled by each module
         // separately.
+        case ErrorCode.INVALID_VALUE:
         case ErrorCode.NOT_ENOUGH_PERMISSIONS:
         case ErrorCode.NOT_ENOUGH_PERMISSIONS_TO_GRANT_PERMISSIONS:
         case ErrorCode.ALREADY_EXISTS:
@@ -55,7 +74,7 @@ export function apiErrorFactory({ response, result }: { response: Response, resu
         case ErrorCode.INSUFFICIENT_SHARE_QUOTA:
         case ErrorCode.INSUFFICIENT_SHARE_JOINED_QUOTA:
         case ErrorCode.INSUFFICIENT_BOOKMARKS_QUOTA:
-            return new ValidationError(message, code);
+            return new ValidationError(message, code, details);
         default:
             return new APICodeError(message, code, debug);
     }
@@ -86,6 +105,6 @@ export class APICodeError extends ServerError {
     }
 }
 
-export class NotFoundAPIError extends APICodeError {
+export class NotFoundAPIError extends ValidationError {
     name = 'NotFoundAPIError';
 }

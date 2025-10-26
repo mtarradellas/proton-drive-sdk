@@ -1,24 +1,28 @@
-import { ProtonDriveEntitiesCache, ProtonDriveCryptoCache, ProtonDriveAccount, MemberRole, NodeType } from "../../interface";
-import { DriveCrypto } from "../../crypto";
-import { MemoryCache } from "../../cache";
-import { getMockTelemetry } from "../../tests/telemetry";
-import { DriveAPIService } from "../apiService";
-import { DriveEventsService, DriveListener, DriveEvent, DriveEventType } from "../events";
-import { makeNodeUid } from "../uids";
-import { SharesService, DecryptedNode } from "./interface";
+import {
+    ProtonDriveEntitiesCache,
+    ProtonDriveCryptoCache,
+    ProtonDriveAccount,
+    MemberRole,
+    NodeType,
+} from '../../interface';
+import { DriveCrypto } from '../../crypto';
+import { MemoryCache } from '../../cache';
+import { getMockTelemetry } from '../../tests/telemetry';
+import { DriveAPIService } from '../apiService';
+import { DriveEventType } from '../events';
+import { makeNodeUid } from '../uids';
+import { SharesService, DecryptedNode } from './interface';
 import { initNodesModule } from './index';
-
-function generateSerializedNode(uid: string, parentUid = 'volumeId~root', params: Partial<DecryptedNode> = {}): string {
-    return JSON.stringify(generateNode(uid, parentUid, params));
-}
+import { NodesCache } from './cache';
+import { getMockLogger } from '../../tests/logger';
 
 function generateNode(uid: string, parentUid = 'volumeId~root', params: Partial<DecryptedNode> = {}): DecryptedNode {
     return {
         uid,
         parentUid,
-        directMemberRole: MemberRole.Admin,
+        directRole: MemberRole.Admin,
         type: NodeType.File,
-        mediaType: "text",
+        mediaType: 'text',
         isShared: false,
         creationTime: new Date(),
         trashTime: undefined,
@@ -33,29 +37,23 @@ describe('nodesModules integration tests', () => {
     let driveCryptoCache: ProtonDriveCryptoCache;
     let account: ProtonDriveAccount;
     let driveCrypto: DriveCrypto;
-    let eventCallbacks: DriveListener[];
-    let driveEvents: DriveEventsService;
     let sharesService: SharesService;
     let nodesModule: ReturnType<typeof initNodesModule>;
+    let nodesCache: NodesCache;
 
     beforeEach(() => {
         // @ts-expect-error No need to implement all methods for mocking
-        apiService = {}
+        apiService = {};
         driveEntitiesCache = new MemoryCache();
         driveCryptoCache = new MemoryCache();
         // @ts-expect-error No need to implement all methods for mocking
-        account = {}
+        account = {};
         // @ts-expect-error No need to implement all methods for mocking
-        driveCrypto = {}
-        eventCallbacks = [];
+        driveCrypto = {};
         // @ts-expect-error No need to implement all methods for mocking
-        driveEvents = {
-            addListener: jest.fn().mockImplementation((callback) => {
-                eventCallbacks.push(callback);
-            }),
-        }
-        // @ts-expect-error No need to implement all methods for mocking
-        sharesService = {}
+        sharesService = {
+            getMyFilesIDs: jest.fn().mockResolvedValue({ volumeId: 'volumeId' }),
+        };
 
         nodesModule = initNodesModule(
             getMockTelemetry(),
@@ -64,23 +62,23 @@ describe('nodesModules integration tests', () => {
             driveCryptoCache,
             account,
             driveCrypto,
-            driveEvents,
             sharesService,
         );
+
+        nodesCache = new NodesCache(getMockLogger(), driveEntitiesCache);
     });
 
     test('should move node from one folder to another after move event', async () => {
         // Prepare two folders (original and target) and a node in the original folder.
         const originalFolderUid = makeNodeUid('volumeId', 'originalFolder');
-        await driveEntitiesCache.setEntity(`node-${originalFolderUid}`, generateSerializedNode(originalFolderUid));
-        await driveEntitiesCache.setEntity(`node-children-${originalFolderUid}`, 'loaded');
-
         const targetFolderUid = makeNodeUid('volumeId', 'targetFolder');
-        await driveEntitiesCache.setEntity(`node-${targetFolderUid}`, generateSerializedNode(targetFolderUid));
-        await driveEntitiesCache.setEntity(`node-children-${targetFolderUid}`, 'loaded');
-
         const nodeUid = makeNodeUid('volumeId', 'node1');
-        await driveEntitiesCache.setEntity(`node-${nodeUid}`, generateSerializedNode(nodeUid, originalFolderUid), [`nodeParentUid:${originalFolderUid}`]);
+
+        await nodesCache.setNode(generateNode(originalFolderUid));
+        await nodesCache.setFolderChildrenLoaded(originalFolderUid);
+        await nodesCache.setNode(generateNode(targetFolderUid));
+        await nodesCache.setFolderChildrenLoaded(targetFolderUid);
+        await nodesCache.setNode(generateNode(nodeUid, originalFolderUid));
 
         // Mock the API services to return the moved node.
         // This is called when listing the children of the target folder after
@@ -88,17 +86,19 @@ describe('nodesModules integration tests', () => {
         apiService.post = jest.fn().mockImplementation(async (url, body) => {
             expect(url).toBe(`drive/v2/volumes/volumeId/links`);
             return {
-                Links: [{
-                    Link: {
-                        LinkID: 'node1',
-                        ParentLinkID: 'targetFolder',
-                        NameHash: 'hash',
-                        Type: 2,
+                Links: [
+                    {
+                        Link: {
+                            LinkID: 'node1',
+                            ParentLinkID: 'targetFolder',
+                            NameHash: 'hash',
+                            Type: 2,
+                        },
+                        File: {
+                            ActiveRevision: {},
+                        },
                     },
-                    File: {
-                        ActiveRevision: {},
-                    },
-                }],
+                ],
             };
         });
         jest.spyOn(nodesModule.access, 'getParentKeys').mockResolvedValue({ key: { _idx: 32131 } } as any);
@@ -111,17 +111,15 @@ describe('nodesModules integration tests', () => {
         expect(targetBeforeMove).toMatchObject([]);
 
         // Send the move event that updates the cache.
-        const events: DriveEvent[] = [
-            {
-                type: DriveEventType.NodeUpdated,
-                nodeUid,
-                parentNodeUid: targetFolderUid,
-                isTrashed: false,
-                isShared: false,
-                isOwnVolume: true,
-            },
-        ]
-        await Promise.all(eventCallbacks.map((callback) => callback(events)));
+        await nodesModule.eventHandler.updateNodesCacheOnEvent({
+            type: DriveEventType.NodeUpdated,
+            nodeUid,
+            parentNodeUid: targetFolderUid,
+            isTrashed: false,
+            isShared: false,
+            treeEventScopeId: 'volumeId',
+            eventId: '1',
+        });
 
         // Verify the state after the move event, including when API service is called.
         const originalAfterMove = await Array.fromAsync(nodesModule.access.iterateFolderChildren(originalFolderUid));

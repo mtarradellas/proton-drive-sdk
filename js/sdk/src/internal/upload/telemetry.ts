@@ -1,26 +1,29 @@
-import { RateLimitedError, ValidationError, IntegrityError } from "../../errors";
-import { ProtonDriveTelemetry, MetricsUploadErrorType, Logger } from "../../interface";
-import { LoggerWithPrefix } from "../../telemetry";
+import { RateLimitedError, ValidationError, IntegrityError } from '../../errors';
+import { ProtonDriveTelemetry, MetricsUploadErrorType, Logger } from '../../interface';
+import { LoggerWithPrefix } from '../../telemetry';
 import { APIHTTPError } from '../apiService';
-import { splitNodeUid, splitNodeRevisionUid } from "../uids";
-import { SharesService } from "./interface";
+import { splitNodeUid, splitNodeRevisionUid } from '../uids';
+import { SharesService } from './interface';
 
 export class UploadTelemetry {
     private logger: Logger;
 
-    constructor(private telemetry: ProtonDriveTelemetry, private sharesService: SharesService) {
+    constructor(
+        private telemetry: ProtonDriveTelemetry,
+        private sharesService: SharesService,
+    ) {
         this.telemetry = telemetry;
-        this.logger = this.telemetry.getLogger("download");
+        this.logger = this.telemetry.getLogger('download');
         this.sharesService = sharesService;
     }
 
     getLoggerForRevision(revisionUid: string) {
-        const logger = this.telemetry.getLogger("upload");
+        const logger = this.telemetry.getLogger('upload');
         return new LoggerWithPrefix(logger, `revision ${revisionUid}`);
     }
 
     logBlockVerificationError(retryHelped: boolean) {
-        this.telemetry.logEvent({
+        this.telemetry.recordMetric({
             eventName: 'blockVerificationError',
             retryHelped,
         });
@@ -40,6 +43,7 @@ export class UploadTelemetry {
             uploadedSize: 0,
             expectedSize,
             error: errorCategory,
+            originalError: error,
         });
     }
 
@@ -57,6 +61,7 @@ export class UploadTelemetry {
             uploadedSize,
             expectedSize,
             error: errorCategory,
+            originalError: error,
         });
     }
 
@@ -68,21 +73,25 @@ export class UploadTelemetry {
         });
     }
 
-    private async sendTelemetry(volumeId: string, options: {
-        uploadedSize: number,
-        expectedSize: number,
-        error?: MetricsUploadErrorType,
-    }) {
-        let context;
+    private async sendTelemetry(
+        volumeId: string,
+        options: {
+            uploadedSize: number;
+            expectedSize: number;
+            error?: MetricsUploadErrorType;
+            originalError?: unknown;
+        },
+    ) {
+        let volumeType;
         try {
-            context = await this.sharesService.getVolumeMetricContext(volumeId);
+            volumeType = await this.sharesService.getVolumeMetricContext(volumeId);
         } catch (error: unknown) {
-            this.logger.error('Failed to get metric context', error);
+            this.logger.error('Failed to get metric volume type', error);
         }
 
-        this.telemetry.logEvent({
+        this.telemetry.recordMetric({
             eventName: 'upload',
-            context,
+            volumeType,
             ...options,
         });
     }
@@ -103,14 +112,18 @@ function getErrorCategory(error: unknown): MetricsUploadErrorType | undefined {
             return '4xx';
         }
         if (error.statusCode >= 500) {
-            return '5xx';
+            return 'server_error';
         }
     }
     if (error instanceof Error) {
         if (error.name === 'TimeoutError') {
             return 'server_error';
         }
-        if (error.name === 'OfflineError' || error.name === 'NetworkError' || error.message?.toLowerCase() === 'network error') {
+        if (
+            error.name === 'OfflineError' ||
+            error.name === 'NetworkError' ||
+            error.message?.toLowerCase() === 'network error'
+        ) {
             return 'network_error';
         }
         if (error.name === 'AbortError') {

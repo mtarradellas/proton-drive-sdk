@@ -1,7 +1,7 @@
-import { NodeType, MemberRole, NonProtonInvitationState, MissingNode, ShareResult, PublicLink } from "../../interface";
-import { PrivateKey, SessionKey } from "../../crypto";
-import { EncryptedShare } from "../shares";
-import { DecryptedNode } from "../nodes";
+import { NodeType, MemberRole, NonProtonInvitationState, MissingNode, ShareResult, PublicLink } from '../../interface';
+import { PrivateKey, SessionKey } from '../../crypto';
+import { EncryptedShare } from '../shares';
+import { DecryptedNode } from '../nodes';
 
 export enum SharingType {
     SharedByMe = 'sharedByMe',
@@ -21,7 +21,7 @@ export interface EncryptedInvitationRequest {
 
 /**
  * Internal interface of existing invitation on the API.
- * 
+ *
  * This interface is used only for managing the invitations. For listing
  * invitations with node metadata, see `EncryptedInvitationWithNode`.
  */
@@ -32,7 +32,7 @@ export interface EncryptedInvitation extends EncryptedInvitationRequest {
 
 /**
  * Internal interface of existing invitation with the share and node metadata.
- * 
+ *
  * Invitation with node is used for listing shared nodes with me, so it includes
  * what is being shared as well.
  */
@@ -43,10 +43,11 @@ export interface EncryptedInvitationWithNode extends EncryptedInvitation {
         creatorEmail: string;
     };
     node: {
+        uid: string;
         type: NodeType;
         mediaType?: string;
         encryptedName: string;
-    }
+    };
 }
 
 /**
@@ -109,23 +110,24 @@ export interface EncryptedBookmark {
 }
 
 export interface EncryptedPublicLink {
-    uid: string,
-    creationTime: Date,
-    expirationTime?: Date,
-    role: MemberRole,
-    flags: number,
-    creatorEmail: string,
-    publicUrl: string,
-    armoredUrlPassword: string,
-    urlPasswordSalt: string,
-    base64SharePassphraseKeyPacket: string,
-    sharePassphraseSalt: string,
+    uid: string;
+    creationTime: Date;
+    expirationTime?: Date;
+    role: MemberRole;
+    flags: number;
+    creatorEmail: string;
+    publicUrl: string;
+    numberOfInitializedDownloads: number;
+    armoredUrlPassword: string;
+    urlPasswordSalt: string;
+    base64SharePassphraseKeyPacket: string;
+    sharePassphraseSalt: string;
 }
 
 export interface EncryptedPublicLinkCrypto {
-    base64SharePasswordSalt: string,
-    base64SharePassphraseKeyPacket: string,
-    armoredPassword: string,
+    base64SharePasswordSalt: string;
+    base64SharePassphraseKeyPacket: string;
+    armoredPassword: string;
 }
 
 export interface ShareResultWithCreatorEmail extends ShareResult {
@@ -136,42 +138,44 @@ export interface PublicLinkWithCreatorEmail extends PublicLink {
     creatorEmail: string;
 }
 
-
 /**
  * Interface describing the dependencies to the shares module.
  */
 export interface SharesService {
-    getMyFilesIDs(): Promise<{ volumeId: string }>,
-    loadEncryptedShare(shareId: string): Promise<EncryptedShare>,
-    getContextShareMemberEmailKey(shareId: string): Promise<{
-        email: string,
-        addressId: string,
-        addressKey: PrivateKey,
-    }>,
+    getMyFilesIDs(): Promise<{ volumeId: string }>;
+    loadEncryptedShare(shareId: string): Promise<EncryptedShare>;
+    getMyFilesShareMemberEmailKey(): Promise<{
+        email: string;
+        addressId: string;
+        addressKey: PrivateKey;
+    }>;
+    isOwnVolume(volumeId: string): Promise<boolean>;
 }
 
 /**
  * Interface describing the dependencies to the nodes module.
  */
 export interface NodesService {
-    getNode(nodeUid: string): Promise<DecryptedNode>,
-    getNodeKeys(nodeUid: string): Promise<{ key: PrivateKey }>,
+    getNode(nodeUid: string): Promise<DecryptedNode>;
+    getNodeKeys(nodeUid: string): Promise<{ key: PrivateKey }>;
     getNodePrivateAndSessionKeys(nodeUid: string): Promise<{
-        key: PrivateKey,
-        passphraseSessionKey: SessionKey,
-        nameSessionKey: SessionKey,
-    }>,
+        key: PrivateKey;
+        passphraseSessionKey: SessionKey;
+        nameSessionKey: SessionKey;
+    }>;
     getRootNodeEmailKey(nodeUid: string): Promise<{
-        email: string,
-        addressId: string,
-        addressKey: PrivateKey,
-    }>,
+        email: string;
+        addressId: string;
+        addressKey: PrivateKey;
+    }>;
     iterateNodes(nodeUids: string[], signal?: AbortSignal): AsyncGenerator<DecryptedNode | MissingNode>;
+    notifyNodeChanged(nodeUid: string): Promise<void>;
 }
 
+// TODO I think this can be removed
 /**
  * Interface describing the dependencies to the nodes module.
  */
 export interface NodesEvents {
-    nodeUpdated(partialNode: { uid: string, shareId: string | undefined, isShared: boolean }): Promise<void>,
+    nodeUpdated(partialNode: { uid: string; shareId: string | undefined; isShared: boolean }): Promise<void>;
 }

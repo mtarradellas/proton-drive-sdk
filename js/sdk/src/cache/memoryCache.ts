@@ -1,11 +1,11 @@
 import type { ProtonDriveCache, EntityResult } from './interface';
 
-type KeyValueCache<T> = { [ key: string ]: T };
-type TagsCache = { [ tag: string ]: string[] };
+type KeyValueCache<T> = { [key: string]: T };
+type TagsCache = { [tag: string]: string[] };
 
 /**
  * In-memory cache implementation for Proton Drive SDK.
- * 
+ *
  * This cache is not persistent and is intended for mostly for testing or
  * development only. It is not recommended to use this cache in production
  * environments.
@@ -41,7 +41,7 @@ export class MemoryCache<T> implements ProtonDriveCache<T> {
         }
     }
 
-    async getEntity(key: string) {
+    async getEntity(key: string): Promise<T> {
         const value = this.entities[key];
         if (!value) {
             throw Error('Entity not found');
@@ -82,4 +82,4 @@ export class MemoryCache<T> implements ProtonDriveCache<T> {
             });
         }
     }
-};
+}

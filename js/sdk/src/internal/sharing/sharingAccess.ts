@@ -1,13 +1,17 @@
 import { c } from 'ttag';
 
-import { ProtonInvitationWithNode } from "../../interface";
-import { ValidationError } from "../../errors";
-import { DecryptedNode } from "../nodes";
-import { BatchLoading } from "../batchLoading";
-import { SharingAPIService } from "./apiService";
-import { SharingCache } from "./cache";
-import { SharingCryptoService } from "./cryptoService";
-import { SharesService, NodesService } from "./interface";
+import { MaybeBookmark, ProtonInvitationWithNode, resultError, resultOk } from '../../interface';
+import { ValidationError } from '../../errors';
+import { DecryptedNode } from '../nodes';
+import { BatchLoading } from '../batchLoading';
+import { SharingAPIService } from './apiService';
+import { SharingCache } from './cache';
+import { SharingCryptoService } from './cryptoService';
+import { SharesService, NodesService } from './interface';
+
+// This is the number of nodes that are loaded in parallel.
+// It is a trade-off between initial wait time and overhead of API calls.
+export const BATCH_LOADING_SIZE = 30;
 
 /**
  * Provides high-level actions for access shared nodes.
@@ -31,42 +35,59 @@ export class SharingAccess {
         this.nodesService = nodesService;
     }
 
-    async* iterateSharedNodes(signal?: AbortSignal): AsyncGenerator<DecryptedNode> {
+    async *iterateSharedNodes(signal?: AbortSignal): AsyncGenerator<DecryptedNode> {
         try {
             const nodeUids = await this.cache.getSharedByMeNodeUids();
             yield* this.iterateSharedNodesFromCache(nodeUids, signal);
         } catch {
             const { volumeId } = await this.sharesService.getMyFilesIDs();
             const nodeUidsIterator = this.apiService.iterateSharedNodeUids(volumeId, signal);
-            yield* this.iterateSharedNodesFromAPI(nodeUidsIterator, (nodeUids) => this.cache.setSharedByMeNodeUids(nodeUids), signal);
+            yield* this.iterateSharedNodesFromAPI(
+                nodeUidsIterator,
+                (nodeUids) => this.cache.setSharedByMeNodeUids(nodeUids),
+                signal,
+            );
         }
     }
 
-    async* iterateSharedNodesWithMe(signal?: AbortSignal): AsyncGenerator<DecryptedNode> {
+    async *iterateSharedNodesWithMe(signal?: AbortSignal): AsyncGenerator<DecryptedNode> {
         try {
             const nodeUids = await this.cache.getSharedWithMeNodeUids();
             yield* this.iterateSharedNodesFromCache(nodeUids, signal);
         } catch {
             const nodeUidsIterator = this.apiService.iterateSharedWithMeNodeUids(signal);
-            yield* this.iterateSharedNodesFromAPI(nodeUidsIterator, (nodeUids) => this.cache.setSharedWithMeNodeUids(nodeUids), signal);
+            yield* this.iterateSharedNodesFromAPI(
+                nodeUidsIterator,
+                (nodeUids) => this.cache.setSharedWithMeNodeUids(nodeUids),
+                signal,
+            );
         }
     }
 
-    private async* iterateSharedNodesFromCache(nodeUids: string[], signal?: AbortSignal): AsyncGenerator<DecryptedNode> {
-        const batchLoading = new BatchLoading<string, DecryptedNode>({ iterateItems: (nodeUids) => this.iterateNodesAndIgnoreMissingOnes(nodeUids, signal) });
+    private async *iterateSharedNodesFromCache(
+        nodeUids: string[],
+        signal?: AbortSignal,
+    ): AsyncGenerator<DecryptedNode> {
+        const batchLoading = new BatchLoading<string, DecryptedNode>({
+            iterateItems: (nodeUids) => this.iterateNodesAndIgnoreMissingOnes(nodeUids, signal),
+            batchSize: BATCH_LOADING_SIZE,
+        });
         for (const nodeUid of nodeUids) {
             yield* batchLoading.load(nodeUid);
         }
         yield* batchLoading.loadRest();
     }
 
-    private async* iterateSharedNodesFromAPI(
+    private async *iterateSharedNodesFromAPI(
         nodeUidsIterator: AsyncGenerator<string>,
         setCache: (nodeUids: string[]) => Promise<void>,
         signal?: AbortSignal,
     ): AsyncGenerator<DecryptedNode> {
         const loadedNodeUids = [];
-        const batchLoading = new BatchLoading<string, DecryptedNode>({ iterateItems: (nodeUids) => this.iterateNodesAndIgnoreMissingOnes(nodeUids, signal) });
+        const batchLoading = new BatchLoading<string, DecryptedNode>({
+            iterateItems: (nodeUids) => this.iterateNodesAndIgnoreMissingOnes(nodeUids, signal),
+            batchSize: BATCH_LOADING_SIZE,
+        });
         for await (const nodeUid of nodeUidsIterator) {
             loadedNodeUids.push(nodeUid);
             yield* batchLoading.load(nodeUid);
@@ -77,7 +98,10 @@ export class SharingAccess {
         await setCache(loadedNodeUids);
     }
 
-    private async* iterateNodesAndIgnoreMissingOnes(nodeUids: string[], signal?: AbortSignal): AsyncGenerator<DecryptedNode> {
+    private async *iterateNodesAndIgnoreMissingOnes(
+        nodeUids: string[],
+        signal?: AbortSignal,
+    ): AsyncGenerator<DecryptedNode> {
         const nodeGenerator = this.nodesService.iterateNodes(nodeUids, signal);
         for await (const node of nodeGenerator) {
             if ('missingUid' in node) {
@@ -102,7 +126,7 @@ export class SharingAccess {
         await this.apiService.removeMember(memberUid);
     }
 
-    async* iterateInvitations(signal?: AbortSignal): AsyncGenerator<ProtonInvitationWithNode> {
+    async *iterateInvitations(signal?: AbortSignal): AsyncGenerator<ProtonInvitationWithNode> {
         for await (const invitationUid of this.apiService.iterateInvitationUids(signal)) {
             const encryptedInvitation = await this.apiService.getInvitation(invitationUid);
             const invitation = await this.cryptoService.decryptInvitationWithNode(encryptedInvitation);
@@ -120,14 +144,40 @@ export class SharingAccess {
         await this.apiService.rejectInvitation(invitationUid);
     }
 
-    // FIXME: return decrypted bookmarks
-    async* iterateSharedBookmarks(signal?: AbortSignal): AsyncGenerator<string> {
+    async *iterateBookmarks(signal?: AbortSignal): AsyncGenerator<MaybeBookmark> {
         for await (const bookmark of this.apiService.iterateBookmarks(signal)) {
-            yield bookmark.tokenId;
+            const { url, customPassword, nodeName } = await this.cryptoService.decryptBookmark(bookmark);
+
+            if (!url.ok || !customPassword.ok || !nodeName.ok) {
+                yield resultError({
+                    uid: bookmark.tokenId,
+                    creationTime: bookmark.creationTime,
+                    url: url,
+                    customPassword,
+                    node: {
+                        name: nodeName,
+                        type: bookmark.node.type,
+                        mediaType: bookmark.node.mediaType,
+                    },
+                });
+            } else {
+                yield resultOk({
+                    uid: bookmark.tokenId,
+                    creationTime: bookmark.creationTime,
+                    url: url.value,
+                    customPassword: customPassword.value,
+                    node: {
+                        name: nodeName.value,
+                        type: bookmark.node.type,
+                        mediaType: bookmark.node.mediaType,
+                    },
+                });
+            }
         }
     }
 
-    async deleteBookmark(tokenId: string): Promise<void> {
+    async deleteBookmark(bookmarkUid: string): Promise<void> {
+        const tokenId = bookmarkUid;
         await this.apiService.deleteBookmark(tokenId);
     }
 }

@@ -1,5 +1,16 @@
-import { PrivateKey, SessionKey } from "../../crypto";
-import { NodeEntity, Result, InvalidNameError, Author, MemberRole, NodeType, ThumbnailType, MetricContext, Revision, RevisionState } from "../../interface";
+import { PrivateKey, SessionKey } from '../../crypto';
+import {
+    NodeEntity,
+    Result,
+    InvalidNameError,
+    Author,
+    MemberRole,
+    NodeType,
+    ThumbnailType,
+    MetricVolumeType,
+    Revision,
+    RevisionState,
+} from '../../interface';
 
 /**
  * Internal common node interface for both encrypted or decrypted node.
@@ -7,6 +18,8 @@ import { NodeEntity, Result, InvalidNameError, Author, MemberRole, NodeType, Thu
 interface BaseNode {
     // Internal metadata
     hash?: string; // root node doesn't have any hash
+    // ecnryptedName should not be needed to keep, nameSessionKey should be enough.
+    // We will improve this in the future.
     encryptedName: string;
 
     // Basic node metadata
@@ -20,17 +33,22 @@ interface BaseNode {
 
     // Share node metadata
     shareId?: string;
-    isShared: boolean,
-    directMemberRole: MemberRole,
+    isShared: boolean;
+    directRole: MemberRole;
+    membership?: {
+        role: MemberRole;
+        inviteTime: Date;
+        // TODO: acceptedBy: Author;
+    };
 }
 
 /**
  * Interface used only internaly in the nodes module.
- * 
+ *
  * Outside of the module, the decrypted node interface should be used.
  */
 export interface EncryptedNode extends BaseNode {
-    encryptedCrypto: EncryptedNodeFolderCrypto | EncryptedNodeFileCrypto;
+    encryptedCrypto: EncryptedNodeFolderCrypto | EncryptedNodeFileCrypto | EncryptedNodeAlbumCrypto;
 }
 
 export interface EncryptedNodeCrypto {
@@ -38,7 +56,13 @@ export interface EncryptedNodeCrypto {
     nameSignatureEmail?: string;
     armoredKey: string;
     armoredNodePassphrase: string;
-    armoredNodePassphraseSignature: string;
+    armoredNodePassphraseSignature?: string;
+    membership?: {
+        inviterEmail: string;
+        base64MemberSharePassphraseKeyPacket: string;
+        armoredInviterSharePassphraseKeyPacketSignature: string;
+        armoredInviteeSharePassphraseSessionKeySignature: string;
+    };
 }
 
 export interface EncryptedNodeFileCrypto extends EncryptedNodeCrypto {
@@ -56,6 +80,9 @@ export interface EncryptedNodeFolderCrypto extends EncryptedNodeCrypto {
     };
 }
 
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export interface EncryptedNodeAlbumCrypto extends EncryptedNodeCrypto {}
+
 /**
  * Interface used only internally in the nodes module.
  *
@@ -64,36 +91,43 @@ export interface EncryptedNodeFolderCrypto extends EncryptedNodeCrypto {
  * This interface is holding decrypted node metadata that is not yet parsed,
  * such as extended attributes.
  */
-export interface DecryptedUnparsedNode extends BaseNode {
-    keyAuthor: Author,
-    nameAuthor: Author,
-    name: Result<string, Error>,
-    activeRevision?: Result<DecryptedUnparsedRevision, Error>,
+export interface DecryptedUnparsedNode extends Omit<BaseNode, 'membership'> {
+    keyAuthor: Author;
+    nameAuthor: Author;
+    membership?: {
+        role: MemberRole;
+        inviteTime: Date;
+        sharedBy: Author;
+    };
+    name: Result<string, Error>;
+    activeRevision?: Result<DecryptedUnparsedRevision, Error>;
     folder?: {
-        extendedAttributes?: string,
-    },
-    errors?: unknown[],
+        extendedAttributes?: string;
+    };
+    errors?: unknown[];
 }
 
 /**
  * Interface holding decrypted node metadata.
  */
-export interface DecryptedNode extends Omit<DecryptedUnparsedNode, 'name' | 'activeRevision' | 'folder'>, Omit<NodeEntity, 'name' | 'activeRevision'> {
+export interface DecryptedNode
+    extends Omit<DecryptedUnparsedNode, 'name' | 'activeRevision' | 'folder'>,
+        Omit<NodeEntity, 'name' | 'activeRevision'> {
     // Internal metadata
     isStale: boolean;
-    name: Result<string, Error | InvalidNameError>,
+    name: Result<string, Error | InvalidNameError>;
 
-    activeRevision?: Result<DecryptedRevision, Error>,
+    activeRevision?: Result<DecryptedRevision, Error>;
     folder?: {
-        claimedModificationTime?: Date,
-    },
+        claimedModificationTime?: Date;
+    };
 }
 
 /**
  * Interface holding decrypted node key, including session key, and hash key.
  *
  * These keys are cached as they are needed for various actions on the node.
- * 
+ *
  * Passphrase, for example, might be removed at some point. It is needed as
  * at this moment the move requires both node key passphrase and the session
  * key.
@@ -117,7 +151,7 @@ interface BaseRevision {
 export type Thumbnail = {
     uid: string;
     type: ThumbnailType;
-}
+};
 
 export interface EncryptedRevision extends BaseRevision {
     signatureEmail?: string;
@@ -125,28 +159,29 @@ export interface EncryptedRevision extends BaseRevision {
 }
 
 export interface DecryptedUnparsedRevision extends BaseRevision {
-    contentAuthor: Author,
-    extendedAttributes?: string,
+    contentAuthor: Author;
+    extendedAttributes?: string;
 }
 
 export interface DecryptedRevision extends Revision {
     thumbnails?: Thumbnail[];
+    claimedBlockSizes?: number[];
 }
 
 /**
  * Interface describing the dependencies to the shares module.
  */
 export interface SharesService {
-    getMyFilesIDs(): Promise<{ volumeId: string, rootNodeId: string }>,
-    getSharePrivateKey(shareId: string): Promise<PrivateKey>,
+    getMyFilesIDs(): Promise<{ volumeId: string; rootNodeId: string }>;
+    getSharePrivateKey(shareId: string): Promise<PrivateKey>;
     getMyFilesShareMemberEmailKey(): Promise<{
-        email: string,
-    }>,
+        email: string;
+    }>;
     getContextShareMemberEmailKey(shareId: string): Promise<{
-        email: string,
-        addressId: string,
-        addressKey: PrivateKey,
-        addressKeyId: string,
-    }>,
-    getVolumeMetricContext(volumeId: string): Promise<MetricContext>,
+        email: string;
+        addressId: string;
+        addressKey: PrivateKey;
+        addressKeyId: string;
+    }>;
+    getVolumeMetricContext(volumeId: string): Promise<MetricVolumeType>;
 }

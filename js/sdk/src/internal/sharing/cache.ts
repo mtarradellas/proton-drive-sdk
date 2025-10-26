@@ -1,9 +1,9 @@
-import { ProtonDriveEntitiesCache } from "../../interface";
-import { SharingType } from "./interface";
+import { ProtonDriveEntitiesCache } from '../../interface';
+import { SharingType } from './interface';
 
 /**
  * Provides caching for shared by me and with me listings.
- * 
+ *
  * The cache is responsible for serialising and deserialising the node
  * UIDs for each sharing type. Also, ensuring that only full lists are
  * cached.
@@ -20,6 +20,15 @@ export class SharingCache {
 
     async getSharedByMeNodeUids(): Promise<string[]> {
         return this.getNodeUids(SharingType.SharedByMe);
+    }
+
+    async hasSharedByMeNodeUidsLoaded(): Promise<boolean> {
+        try {
+            await this.getNodeUids(SharingType.SharedByMe);
+            return true;
+        } catch {
+            return false;
+        }
     }
 
     async addSharedByMeNodeUid(nodeUid: string): Promise<void> {

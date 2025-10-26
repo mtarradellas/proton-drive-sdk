@@ -1,23 +1,34 @@
 import { c } from 'ttag';
 
-import { PrivateKey, SessionKey } from "../../crypto";
-import { InvalidNameError, Logger, MissingNode, NodeType, Result, resultError, resultOk } from "../../interface";
-import { DecryptionError, ProtonDriveError } from "../../errors";
+import { PrivateKey, SessionKey } from '../../crypto';
+import { InvalidNameError, Logger, MissingNode, NodeType, Result, resultError, resultOk } from '../../interface';
+import { DecryptionError, ProtonDriveError } from '../../errors';
+import { asyncIteratorMap } from '../asyncIteratorMap';
 import { getErrorMessage } from '../errors';
-import { BatchLoading } from "../batchLoading";
-import { makeNodeUid, splitNodeUid } from "../uids";
-import { NodeAPIService } from "./apiService";
-import { NodesCache } from "./cache"
-import { NodesCryptoCache } from "./cryptoCache";
-import { NodesCryptoService } from "./cryptoService";
-import { parseFileExtendedAttributes, parseFolderExtendedAttributes } from "./extendedAttributes";
-import { SharesService, EncryptedNode, DecryptedUnparsedNode, DecryptedNode, DecryptedNodeKeys } from "./interface";
-import { validateNodeName } from "./validations";
+import { BatchLoading } from '../batchLoading';
+import { makeNodeUid, splitNodeUid } from '../uids';
+import { NodeAPIService } from './apiService';
+import { NodesCache } from './cache';
+import { NodesCryptoCache } from './cryptoCache';
+import { NodesCryptoService } from './cryptoService';
+import { parseFileExtendedAttributes, parseFolderExtendedAttributes } from './extendedAttributes';
+import { SharesService, EncryptedNode, DecryptedUnparsedNode, DecryptedNode, DecryptedNodeKeys } from './interface';
+import { validateNodeName } from './validations';
 import { isProtonDocument, isProtonSheet } from './mediaTypes';
+
+// This is the number of nodes that are loaded in parallel.
+// It is a trade-off between initial wait time and overhead of API calls.
+const BATCH_LOADING_SIZE = 30;
+
+// This is the number of nodes that are decrypted in parallel.
+// It is a trade-off between performance and memory usage.
+// Higher number means more memory usage, but faster decryption.
+// Lower number means less memory usage, but slower decryption.
+const DECRYPTION_CONCURRENCY = 30;
 
 /**
  * Provides access to node metadata.
- * 
+ *
  * The node access module is responsible for fetching, decrypting and caching
  * nodes metadata.
  */
@@ -48,7 +59,7 @@ export class NodesAccess {
         let cachedNode;
         try {
             cachedNode = await this.cache.getNode(nodeUid);
-        } catch { }
+        } catch {}
 
         if (cachedNode && !cachedNode.isStale) {
             return cachedNode;
@@ -64,7 +75,10 @@ export class NodesAccess {
         // Ensure the parent is loaded and up-to-date.
         const parentNode = await this.getNode(parentNodeUid);
 
-        const batchLoading = new BatchLoading<string, DecryptedNode>({ iterateItems: (nodeUids) => this.loadNodes(nodeUids, signal) });
+        const batchLoading = new BatchLoading<string, DecryptedNode>({
+            iterateItems: (nodeUids) => this.loadNodes(nodeUids, signal),
+            batchSize: BATCH_LOADING_SIZE,
+        });
 
         const areChildrenCached = await this.cache.isFolderChildrenLoaded(parentNodeUid);
         if (areChildrenCached) {
@@ -84,7 +98,7 @@ export class NodesAccess {
             let node;
             try {
                 node = await this.cache.getNode(nodeUid);
-            } catch { }
+            } catch {}
 
             if (node && !node.isStale) {
                 yield node;
@@ -100,12 +114,15 @@ export class NodesAccess {
     // Improvement requested: keep status of loaded trash and leverage cache.
     async *iterateTrashedNodes(signal?: AbortSignal): AsyncGenerator<DecryptedNode> {
         const { volumeId } = await this.shareService.getMyFilesIDs();
-        const batchLoading = new BatchLoading<string, DecryptedNode>({ iterateItems: (nodeUids) => this.loadNodes(nodeUids, signal) });
+        const batchLoading = new BatchLoading<string, DecryptedNode>({
+            iterateItems: (nodeUids) => this.loadNodes(nodeUids, signal),
+            batchSize: BATCH_LOADING_SIZE,
+        });
         for await (const nodeUid of this.apiService.iterateTrashedNodeUids(volumeId, signal)) {
             let node;
             try {
                 node = await this.cache.getNode(nodeUid);
-            } catch { }
+            } catch {}
 
             if (node && !node.isStale) {
                 yield node;
@@ -118,7 +135,10 @@ export class NodesAccess {
     }
 
     async *iterateNodes(nodeUids: string[], signal?: AbortSignal): AsyncGenerator<DecryptedNode | MissingNode> {
-        const batchLoading = new BatchLoading<string, DecryptedNode | MissingNode>({ iterateItems: (nodeUids) => this.loadNodesWithMissingReport(nodeUids, signal) });
+        const batchLoading = new BatchLoading<string, DecryptedNode | MissingNode>({
+            iterateItems: (nodeUids) => this.loadNodesWithMissingReport(nodeUids, signal),
+            batchSize: BATCH_LOADING_SIZE,
+        });
         for await (const result of this.cache.iterateNodes(nodeUids)) {
             if (result.ok && !result.node.isStale) {
                 yield result.node;
@@ -129,12 +149,49 @@ export class NodesAccess {
         yield* batchLoading.loadRest();
     }
 
-    private async loadNode(nodeUid: string): Promise<{ node: DecryptedNode, keys?: DecryptedNodeKeys }> {
-        const encryptedNode = await this.apiService.getNode(nodeUid);
+    /**
+     * Call to invalidate the folder listing cache. This should be refactored into a clean
+     * cache layer once the cache is split off.
+     */
+    async notifyChildCreated(nodeUid: string): Promise<void> {
+        await this.cache.resetFolderChildrenLoaded(nodeUid);
+    }
+
+    /**
+     * Call to invalidate the node cache when a node changes. Parent can be set after a move
+     * to ensure parent listing of new parent is up to date if cached.
+     * This should be refactored into a clean cache layer once the cache is split off.
+     */
+    async notifyNodeChanged(nodeUid: string, newParentUid?: string): Promise<void> {
+        try {
+            const node = await this.cache.getNode(nodeUid);
+            if (node.isStale && newParentUid === null) {
+                return;
+            }
+            node.isStale = true;
+            if (newParentUid) {
+                node.parentUid = newParentUid;
+            }
+            await this.cache.setNode(node);
+        } catch (error: unknown) {
+            this.logger.warn(`Failed to set node ${nodeUid} as stale after sharing: ${error}`);
+        }
+    }
+
+    /**
+     * Call to remove a node from cache. This should be refactored when the cache is split off.
+     */
+    async notifyNodeDeleted(nodeUid: string): Promise<void> {
+        await this.cache.removeNodes([nodeUid]);
+    }
+
+    private async loadNode(nodeUid: string): Promise<{ node: DecryptedNode; keys?: DecryptedNodeKeys }> {
+        const { volumeId: ownVolumeId } = await this.shareService.getMyFilesIDs();
+        const encryptedNode = await this.apiService.getNode(nodeUid, ownVolumeId);
         return this.decryptNode(encryptedNode);
     }
 
-    private async* loadNodes(nodeUids: string[], signal?: AbortSignal): AsyncGenerator<DecryptedNode> {
+    private async *loadNodes(nodeUids: string[], signal?: AbortSignal): AsyncGenerator<DecryptedNode> {
         for await (const result of this.loadNodesWithMissingReport(nodeUids, signal)) {
             if ('missingUid' in result) {
                 continue;
@@ -143,23 +200,41 @@ export class NodesAccess {
         }
     }
 
-    private async* loadNodesWithMissingReport(nodeUids: string[], signal?: AbortSignal): AsyncGenerator<DecryptedNode | MissingNode> {
+    private async *loadNodesWithMissingReport(
+        nodeUids: string[],
+        signal?: AbortSignal,
+    ): AsyncGenerator<DecryptedNode | MissingNode> {
         const returnedNodeUids: string[] = [];
         const errors = [];
 
-        for await (const encryptedNode of this.apiService.iterateNodes(nodeUids, signal)) {
+        const { volumeId: ownVolumeId } = await this.shareService.getMyFilesIDs();
+
+        const encryptedNodesIterator = this.apiService.iterateNodes(nodeUids, ownVolumeId, signal);
+        const decryptNodeMapper = async (encryptedNode: EncryptedNode): Promise<Result<DecryptedNode, unknown>> => {
             returnedNodeUids.push(encryptedNode.uid);
             try {
                 const { node } = await this.decryptNode(encryptedNode);
-                yield node;
+                return resultOk(node);
             } catch (error: unknown) {
-                errors.push(error);
+                return resultError(error);
+            }
+        };
+        const decryptedNodesIterator = asyncIteratorMap(
+            encryptedNodesIterator,
+            decryptNodeMapper,
+            DECRYPTION_CONCURRENCY,
+        );
+        for await (const node of decryptedNodesIterator) {
+            if (node.ok) {
+                yield node.value;
+            } else {
+                errors.push(node.error);
             }
         }
 
         if (errors.length > 0) {
             this.logger.error(`Failed to decrypt ${errors.length} nodes`, errors);
-            throw new ProtonDriveError(c('Error').t`Failed to decrypt some nodes`, { cause: errors });
+            throw new DecryptionError(c('Error').t`Failed to decrypt some nodes`, { cause: errors });
         }
 
         const missingNodeUids = nodeUids.filter((nodeUid) => !returnedNodeUids.includes(nodeUid));
@@ -173,7 +248,9 @@ export class NodesAccess {
         }
     }
 
-    private async decryptNode(encryptedNode: EncryptedNode): Promise<{ node: DecryptedNode, keys?: DecryptedNodeKeys }> {
+    private async decryptNode(
+        encryptedNode: EncryptedNode,
+    ): Promise<{ node: DecryptedNode; keys?: DecryptedNodeKeys }> {
         let parentKey;
         try {
             const parentKeys = await this.getParentKeys(encryptedNode);
@@ -193,7 +270,18 @@ export class NodesAccess {
                             claimedAuthor: encryptedNode.encryptedCrypto.nameSignatureEmail,
                             error: getErrorMessage(error),
                         }),
+                        membership: encryptedNode.membership
+                            ? {
+                                  role: encryptedNode.membership.role,
+                                  inviteTime: encryptedNode.membership.inviteTime,
+                                  sharedBy: resultError({
+                                      claimedAuthor: encryptedNode.encryptedCrypto.membership?.inviterEmail,
+                                      error: getErrorMessage(error),
+                                  }),
+                              }
+                            : undefined,
                         errors: [error],
+                        treeEventScopeId: splitNodeUid(encryptedNode.uid).volumeId,
                     },
                 };
             }
@@ -201,7 +289,7 @@ export class NodesAccess {
         }
 
         const { node: unparsedNode, keys } = await this.cryptoService.decryptNode(encryptedNode, parentKey);
-        const node = await this.parseNode(unparsedNode);
+        const node = await parseNode(this.logger, unparsedNode);
         try {
             await this.cache.setNode(node);
         } catch (error: unknown) {
@@ -217,56 +305,9 @@ export class NodesAccess {
         return { node, keys };
     }
 
-    private async parseNode(unparsedNode: DecryptedUnparsedNode): Promise<DecryptedNode> {
-        let nodeName: Result<string, Error | InvalidNameError> = unparsedNode.name;
-        if (unparsedNode.name.ok) {
-            try {
-                validateNodeName(unparsedNode.name.value);
-            } catch (error: unknown) {
-                this.logger.warn(`Node name validation failed: ${error instanceof Error ? error.message : error}`);
-                nodeName = resultError({
-                    name: unparsedNode.name.value,
-                    error: error instanceof Error ? error.message : c('Error').t`Unknown error`,
-                });
-            }
-        }
-
-        if (unparsedNode.type === NodeType.File) {
-            const extendedAttributes = unparsedNode.activeRevision?.ok
-                ? parseFileExtendedAttributes(this.logger, unparsedNode.activeRevision.value.extendedAttributes)
-                : undefined;
-
-            return {
-                ...unparsedNode,
-                isStale: false,
-                activeRevision: !unparsedNode.activeRevision?.ok ? unparsedNode.activeRevision : resultOk({
-                    uid: unparsedNode.activeRevision.value.uid,
-                    state: unparsedNode.activeRevision.value.state,
-                    creationTime: unparsedNode.activeRevision.value.creationTime,
-                    storageSize: unparsedNode.activeRevision.value.storageSize,
-                    contentAuthor: unparsedNode.activeRevision.value.contentAuthor,
-                    thumbnails: unparsedNode.activeRevision.value.thumbnails,
-                    ...extendedAttributes,
-                }),
-                folder: undefined,
-            }
-        }
-
-        const extendedAttributes = unparsedNode.folder?.extendedAttributes
-            ? parseFolderExtendedAttributes(this.logger, unparsedNode.folder.extendedAttributes)
-            : undefined;
-        return {
-            ...unparsedNode,
-            name: nodeName,
-            isStale: false,
-            activeRevision: undefined,
-            folder: extendedAttributes ? {
-                ...extendedAttributes,
-            } : undefined,
-        }
-    }
-
-    async getParentKeys(node: Pick<DecryptedNode, 'parentUid' | 'shareId'>): Promise<Pick<DecryptedNodeKeys, 'key' | 'hashKey'>> {
+    async getParentKeys(
+        node: Pick<DecryptedNode, 'parentUid' | 'shareId'>,
+    ): Promise<Pick<DecryptedNodeKeys, 'key' | 'hashKey'>> {
         if (node.parentUid) {
             try {
                 return await this.getNodeKeys(node.parentUid);
@@ -275,7 +316,7 @@ export class NodesAccess {
                     // Change the error message to be more specific.
                     // Original error message is referring to node, while here
                     // it referes to as parent to follow the method context.
-                    throw new DecryptionError(c('Error').t`Parent cannot be decrypted`);
+                    throw new DecryptionError(c('Error').t`Parent cannot be decrypted`, { cause: error });
                 }
                 throw error;
             }
@@ -283,7 +324,7 @@ export class NodesAccess {
         if (node.shareId) {
             return {
                 key: await this.shareService.getSharePrivateKey(node.shareId),
-            }
+            };
         }
         // This is bug that should not happen.
         // API cannot provide node without parent or share.
@@ -303,11 +344,11 @@ export class NodesAccess {
     }
 
     async getNodePrivateAndSessionKeys(nodeUid: string): Promise<{
-        key: PrivateKey,
-        passphrase: string,
-        passphraseSessionKey: SessionKey,
-        contentKeyPacketSessionKey?: SessionKey,
-        nameSessionKey: SessionKey,
+        key: PrivateKey;
+        passphrase: string;
+        passphraseSessionKey: SessionKey;
+        contentKeyPacketSessionKey?: SessionKey;
+        nameSessionKey: SessionKey;
     }> {
         const node = await this.getNode(nodeUid);
         const { key: parentKey } = await this.getParentKeys(node);
@@ -323,10 +364,10 @@ export class NodesAccess {
     }
 
     async getRootNodeEmailKey(nodeUid: string): Promise<{
-        email: string,
-        addressId: string,
-        addressKey: PrivateKey,
-        addressKeyId: string,
+        email: string;
+        addressId: string;
+        addressKey: PrivateKey;
+        addressKeyId: string;
     }> {
         const rootNode = await this.getRootNode(nodeUid);
         if (!rootNode.shareId) {
@@ -356,5 +397,62 @@ export class NodesAccess {
     private async getRootNode(nodeUid: string): Promise<DecryptedNode> {
         const node = await this.getNode(nodeUid);
         return node.parentUid ? this.getRootNode(node.parentUid) : node;
+    }
+}
+
+export async function parseNode(logger: Logger, unparsedNode: DecryptedUnparsedNode): Promise<DecryptedNode> {
+    let nodeName: Result<string, Error | InvalidNameError> = unparsedNode.name;
+    if (unparsedNode.name.ok) {
+        try {
+            validateNodeName(unparsedNode.name.value);
+        } catch (error: unknown) {
+            logger.warn(`Node name validation failed: ${error instanceof Error ? error.message : error}`);
+            nodeName = resultError({
+                name: unparsedNode.name.value,
+                error: error instanceof Error ? error.message : c('Error').t`Unknown error`,
+            });
+        }
+    }
+
+    const treeEventScopeId = splitNodeUid(unparsedNode.uid).volumeId;
+
+    if (unparsedNode.type === NodeType.File) {
+        const extendedAttributes = unparsedNode.activeRevision?.ok
+            ? parseFileExtendedAttributes(
+                  logger,
+                  unparsedNode.activeRevision.value.creationTime,
+                  unparsedNode.activeRevision.value.extendedAttributes,
+              )
+            : undefined;
+
+        return {
+            ...unparsedNode,
+            isStale: false,
+            activeRevision: !unparsedNode.activeRevision?.ok
+                ? unparsedNode.activeRevision
+                : resultOk({
+                      uid: unparsedNode.activeRevision.value.uid,
+                      state: unparsedNode.activeRevision.value.state,
+                      creationTime: unparsedNode.activeRevision.value.creationTime,
+                      storageSize: unparsedNode.activeRevision.value.storageSize,
+                      contentAuthor: unparsedNode.activeRevision.value.contentAuthor,
+                      thumbnails: unparsedNode.activeRevision.value.thumbnails,
+                      ...extendedAttributes,
+                  }),
+            folder: undefined,
+            treeEventScopeId,
+        };
+    }
+
+    const extendedAttributes = unparsedNode.folder?.extendedAttributes
+        ? parseFolderExtendedAttributes(logger, unparsedNode.folder.extendedAttributes)
+        : undefined;
+    return {
+        ...unparsedNode,
+        name: nodeName,
+        isStale: false,
+        activeRevision: undefined,
+        folder: extendedAttributes,
+        treeEventScopeId,
     };
 }
